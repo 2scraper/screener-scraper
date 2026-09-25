@@ -1,0 +1,60 @@
+# A scraper's own output is large, machine-specific and stale by the time
+# anyone reads it. The two committed samples and the generated fixtures are
+# the exception.
+*.json
+*.csv
+!sample_output.json
+!sample_output.csv
+!fixtures_generated.json
+screener_results.*
+*.meta.json
+*_debug.html
+*_debug.png
+*.page[0-9]
+*.page[0-9][0-9]
+*.page[0-9][0-9][0-9]
+
+# ANY working directory a live run writes into, not one chosen name: a
+# sibling committed a 1.5 MB raw dump through `live/` because only
+# `live_results/` was listed. The KIND of directory is what is ignored.
+live/
+live_results/
+out/
+output/
+run/
+runs/
+results/
+tmp/
+scratch/
+dumps/
+# The multi-megabyte raw captures the fixtures are cut from. They carry the
+# session that fetched them (csrf tokens) and are never committed; the
+# scrubbed, trimmed cut of them is fixtures_generated.json.
+captures/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.fingerprint_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.DS_Store
+*.swp
+.idea/
+.vscode/
+*.log
+*.key
+secrets*
+
+# Every spelling of a working .env, not just `.env`: a `.env.bak` or
+# `.env.local` is exactly how a live key gets one `git add -A` away from a
+# commit. The negation keeps the documented example tracked.
+.env*
+!.env.example
+
+# The first version of this scraper, kept locally for reference only.
+legacy/
