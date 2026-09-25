@@ -73,7 +73,7 @@ jobs:
                  echo "::error::Blocked before parsing (exit 3) even through the configured proxy — this looks like a site-side change."
                  exit 1
                else
-                 echo "::notice::Blocked before parsing (exit 3) from a bare GitHub runner, which is a datacentre address. screener.in served this URL from an ordinary connection on 2026-09-25; whether it serves GitHub's runners had not been measured when this workflow was written, so this is more likely the runner's IP than a site change. Set the SCREENER_PROXY secret to check it properly."
+                 echo "::notice::Blocked before parsing (exit 3) from a bare GitHub runner, which is a datacentre address. screener.in served this URL from an ordinary connection on 2026-09-25; it also served a bare GitHub runner on this workflow's first dispatch (2026-09-25), so a block here is new — the runner's IP is still the likeliest cause, not a site change. Set the SCREENER_PROXY secret to check it properly."
                  exit 0
                fi ;;
             4) echo "::error::The site reported this sector as empty (exit 4) — it held 164 companies on 2026-09-25, so this is a site-side change." ; exit 1 ;;

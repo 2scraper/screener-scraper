@@ -202,9 +202,11 @@ looks configurable and is not.
 - **Live:** `canary.yml` runs a real 3-page scrape daily, **ungated** — this
   site needs no credential, so a canary that could pass without one is not
   gated on one — and asserts ranks 1–75, INR on every row and market cap on
-  every row. Whether GitHub's datacentre runners are served had not been
-  measured when this was written; an exit 3 from a bare runner is reported as
-  a notice, not a failure.
+  every row. Its first run, dispatched 2026-09-25 from a bare GitHub runner
+  (a datacentre address, no proxy, no key), passed: 75 rows, ranks 1–75,
+  `status: complete`. An exit 3 from a bare runner is still reported as a
+  notice rather than a failure, since a datacentre address can be refused on
+  a later day for reasons that are not a site change.
 
 ## Legal
 
