@@ -99,6 +99,15 @@ def eq(label, actual, expected):
     return check(label, ok)
 
 
+# HERMETIC: this suite drives the engines' real parse_args, which read the
+# environment and .env. A developer's own SCREENER_PROXY would otherwise make
+# an "offline" check send a real preflight request. So every variable the
+# code reads is cleared and .env loading is disabled for the whole run; the
+# .env checks below set exactly what they test.
+for _key in list(env_config.ENV_KEYS):
+    os.environ.pop(_key, None)
+env_config.load_env = lambda *a, **k: None
+
 with open(os.path.join(REPO, "fixtures_generated.json"), encoding="utf-8") as _f:
     FIXTURES = json.load(_f)
 
@@ -272,6 +281,7 @@ def check_page_states():
             ("register", page_flow.BLOCKED, "login_wall"),
             ("login", page_flow.BLOCKED, "login_wall"),
             ("cdp_register_wall", page_flow.BLOCKED, "login_wall"),
+            ("scraperapi_register_wall", page_flow.BLOCKED, "login_wall"),
             ("chromium_proxy_error", page_flow.BLOCKED, "unknown")):
         st = state_of(name)
         eq(f"{name} is {want}" + (f" ({vendor})" if vendor else ""),
@@ -301,6 +311,10 @@ def check_page_states():
     # Refusal statuses outrank the heuristics; a 404 is its own state.
     eq("a 429 is blocked (http)",
        page_flow.classify("<html></html>", status_code=429).vendor, "http")
+    eq("a 500 is a server error, not a block (and not 'check the proxy')",
+       page_flow.classify("<html></html>", status_code=500).state, page_flow.SERVER_ERROR)
+    eq("while a 503 stays a refusal", page_flow.classify("<html></html>", status_code=503).state,
+       page_flow.BLOCKED)
     eq("a 404 status is not_found, not blocked",
        page_flow.classify("<html></html>", status_code=404).state, page_flow.NOT_FOUND)
     check("not_found is not retried, not paid for, and not exit 3",
@@ -477,6 +491,15 @@ def check_credentials_never_leak():
     check("a password in a URL is redacted", "pass@" not in redacted)
     check("the endpoint itself survives redaction",
           "res.php" in redacted and "cb.2captcha.com:9222" in redacted)
+    eq("a password that itself contains '@' is masked whole",
+       proxy_pool.redact_secret_patterns("http://user:p@ss@host:9999/x"), "http://***:***@host:9999/x")
+    check("a URL carrying only a token before '@' is masked",
+          "TOKEN123456" not in proxy_pool.redact_secret_patterns("wss://TOKEN123456@host:1"))
+    check("a Bearer header value is masked",
+          "abcdef123456" not in proxy_pool.redact_secret_patterns("Authorization: Bearer abcdef123456"))
+    check("and an ordinary URL is left alone",
+          proxy_pool.redact_secret_patterns("https://www.screener.in/company/TCS/")
+          == "https://www.screener.in/company/TCS/")
     # Globally, not once.
     twice = proxy_pool.redact_secret_patterns("key=aaa and key=bbb")
     check("every occurrence is redacted, not just the first",
@@ -520,7 +543,8 @@ def check_remote_connect_failures_are_redacted():
         source = open(os.path.join(REPO, f"{name}.py"), encoding="utf-8").read()
         check(f"{name} wraps its remote connect rather than letting the "
               f"library's own error escape",
-              "redact_secret_patterns(str(e))" in source)
+              re.search(r"Could not (?:connect to --cdp-endpoint|attach to)[^\n]*\n?[^\n]*"
+                        r"redact_secret_patterns\(str\(e\)\)", source) is not None)
         check(f"{name} redacts a traceback before printing it",
               "redact_secret_patterns(traceback.format_exc())" in source)
 
@@ -748,6 +772,44 @@ def check_output_contract():
                             stop_reason="no_results", pages_requested=1,
                             pages_completed=1, start_url="u", final_url="u")
         eq("while a listing the site says is empty IS exit 4", rc, EXIT_NO_PRODUCTS)
+
+        # --allow-empty is for THAT case only. A blocked or failed run must
+        # never replace good output with [], flag or no flag.
+        for blocked, reason, want in ((True, "blocked_login_wall", EXIT_BLOCKED),
+                                      (False, "page_load_timeout", EXIT_FETCH_FAILED),
+                                      (False, "start_page_out_of_range", EXIT_FETCH_FAILED)):
+            with open(f"{prefix}.json", "w", encoding="utf-8") as f:
+                f.write('[{"sku": "yesterday"}]')
+            if os.path.exists(f"{prefix}.meta.json"):
+                os.remove(f"{prefix}.meta.json")
+            with redirect_stdout(io.StringIO()):
+                rc = finish_run([], prefix, "json", True, blocked=blocked,
+                                stop_reason=reason, pages_requested=1,
+                                pages_completed=0, start_url="u", final_url="u")
+            eq(f"--allow-empty with {reason!r} still exits {want}", rc, want)
+            eq(f"and leaves the previous good output alone ({reason})",
+               json.load(open(f"{prefix}.json", encoding="utf-8")), [{"sku": "yesterday"}])
+            check(f"and writes no sidecar ({reason})", not os.path.exists(f"{prefix}.meta.json"))
+
+        class _O:
+            lost = parse_failed = load_failed = raised = proxy_failed = False
+        for st, want in ((page_flow.classify("<html></html>", status_code=404), "page_not_found"),
+                         (page_flow.classify("<html></html>", status_code=500), "page_server_error")):
+            o = _O(); o.state = st
+            eq(f"a {st.state} page is named {want!r}, never 'blocked_…'",
+               output_writer.failure_stop_reason(o), want)
+        o = _O(); o.load_failed = o.proxy_failed = True; o.state = None
+        eq("a dead exit is 'proxy_failed', not a timeout", output_writer.failure_stop_reason(o), "proxy_failed")
+        o = _O(); o.raised = True; o.state = None
+        eq("a fetch that raised is named as that", output_writer.failure_stop_reason(o), "page_fetch_raised")
+
+        # A run that reached the end from ?page=3 is a TAIL, not the listing.
+        with redirect_stdout(io.StringIO()):
+            finish_run([_row(sku="3", rank=51)], prefix, "json", False, blocked=False,
+                       stop_reason="listing_exhausted", pages_requested=5,
+                       pages_completed=5, start_url="u", final_url="u", start_page=3)
+        meta = json.load(open(f"{prefix}.meta.json", encoding="utf-8"))
+        eq("reaching the end from page 3 is coverage 'tail'", (meta["coverage"], meta["start_page"]), ("tail", 3))
 
         with redirect_stdout(io.StringIO()):
             rc = finish_run([_row()], prefix, "json", False, blocked=False,
@@ -2057,7 +2119,7 @@ def check_engine_flows_on_real_answers():
         ("a run started on the LAST page, asking for 50", base + "?page=7", 50,
          {7: "market_p7_last"}, 0, "complete", "listing_exhausted"),
         ("a run started past the end", base + "?page=8", 1,
-         {8: "market_p8_out_of_range"}, EXIT_NO_PRODUCTS, None, None),
+         {8: "market_p8_out_of_range"}, EXIT_FETCH_FAILED, None, None),
         ("the registration wall", "https://www.screener.in/screens/59/magic-formula/", 1,
          {1: "cdp_register_wall"}, EXIT_BLOCKED, None, None),
         ("a screen that does not exist", "https://www.screener.in/screens/999999999/nope/", 1,
@@ -2110,7 +2172,14 @@ def check_engine_flows_on_real_answers():
                 def fake(session, args, pool, page_num, page_url_, _served=served,
                          _fetched=fetched):
                     _fetched.append(page_num)
-                    return _outcome_from_fixture(engine, _served[page_num], page_num,
+                    if page_num not in _served:
+                        # Recorded, not raised: an unplanned fetch must FAIL
+                        # this check, not be swallowed as a failed page.
+                        _fetched.append(f"unplanned:{page_num}")
+                        name = next(iter(_served.values()))
+                    else:
+                        name = _served[page_num]
+                    return _outcome_from_fixture(engine, name, page_num,
                                                  page_url_, args.category)
 
                 async def afake(*a, **kw):
@@ -2135,13 +2204,32 @@ def check_engine_flows_on_real_answers():
                     else:
                         check(f"{engine_name}: {label} writes no sidecar",
                               not os.path.exists(meta_path))
-                    check(f"{engine_name}: {label} fetches only the pages it should "
-                          f"({fetched})", set(fetched) <= set(served))
+                    eq(f"{engine_name}: {label} fetches exactly the pages it should",
+                       fetched, sorted(served))
         finally:
             for k, v in saved.items():
                 setattr(engine, k, v)
     if not ENGINES:
         skip("engine flows", "no engine library installed")
+
+    # A driver exception mid-run must not throw away the pages already read.
+    for engine_name, engine in ENGINES.items():
+        is_async = inspect.iscoroutinefunction(engine._fetch_one_page)
+        saved = engine._fetch_one_page
+
+        def boom(session, args, pool, page_num, url):
+            raise RuntimeError("Target closed ws://u:" + "leakme@cb.2captcha.com:9222")
+
+        async def aboom(*a, **kw):
+            return boom(*a, **kw)
+        try:
+            engine._fetch_one_page = aboom if is_async else boom
+            coro = engine._fetch_safely(None, None, None, 5, "u")
+            out = asyncio.run(coro) if is_async else coro
+            check(f"{engine_name}: a fetch that raises becomes a failed page, not a crash",
+                  out.raised and not out.ok)
+        finally:
+            engine._fetch_one_page = saved
 
     # The HTTP engine runs the same scenarios through its own loop.
     import scraper_api_client as sac

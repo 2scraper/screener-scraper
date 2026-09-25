@@ -59,7 +59,7 @@ jobs:
       - name: Config reporter runs with no .env present
         run: python env_config.py
 
-      - name: The committed fixtures are what make_fixtures.py would build
+      - name: The committed fixtures file is present and loads
         # The raw captures are not in the repo, so this cannot REBUILD them
         # here; it checks the committed file parses and that the suite read
         # it, which the offline suite above already failed on if it did not.

@@ -94,6 +94,11 @@ class PageOutcome:
     # parser/schema problem, never the end of the listing. See the twins.
     parse_failed: bool = False
     lost: bool = False
+    # The exit (proxy) failed, as Chromium reported it — not a timeout.
+    proxy_failed: bool = False
+    # The fetch raised something no branch expected. Recorded as a failed
+    # page, so the rows already gathered are still written.
+    raised: bool = False
 
     @property
     def ok(self) -> bool:
@@ -136,10 +141,14 @@ def _build_driver(args, pool):
         logger.info("Attaching to an existing browser at %s", address)
         options.add_experimental_option("debuggerAddress", address)
         try:
-            return webdriver.Chrome(options=options)
+            driver = webdriver.Chrome(options=options)
         except WebDriverException as e:
             raise RuntimeError(f"Could not attach to {address}: "
                                f"{redact_secret_patterns(str(e))}") from None
+        # Bounded like the twins' 60s goto: chromedriver's own default is 300s
+        # per attempt, and every remote call here is bounded.
+        driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT_S)
+        return driver
 
     if args.headless:
         options.add_argument("--headless=new")
@@ -281,6 +290,22 @@ def _dump_debug(driver, args, page_num: int, html: Optional[str]) -> None:
     logger.warning("Wrote %s (and a .png beside it).", debug_html)
 
 
+def _fetch_safely(session, args, pool, page_num: int, url: str) -> PageOutcome:
+    """`_fetch_one_page`, with an unexpected driver exception recorded as a
+    failed page instead of ending the run — a target that closes on page 5
+    must not throw away pages 1-4. Same rule in every engine."""
+    try:
+        return _fetch_one_page(session, args, pool, page_num, url)
+    except (ProxyError, KeyboardInterrupt):
+        raise
+    except Exception as e:  # noqa: BLE001 — recorded, redacted, not swallowed
+        logger.error("Page %d raised %s — recording it as a failed page.",
+                     page_num, redact_secret_patterns(str(e)))
+        outcome = PageOutcome(page_num=page_num, url=url)
+        outcome.raised = True
+        return outcome
+
+
 def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome:
     """Fetch, classify and parse one page. `page_num` is the SITE page."""
     outcome = PageOutcome(page_num=page_num, url=url)
@@ -362,6 +387,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     if load_failed:
         logger.error("Gave up loading %s after %d attempt(s).", url, args.retries)
         outcome.load_failed = True
+        outcome.proxy_failed = bool(exit_failed)
         return outcome
 
     outcome.state = state
@@ -445,7 +471,7 @@ def scrape(args) -> int:
 
     session = _BrowserSession(args, pool).open()
     try:
-        first = _fetch_one_page(session, args, pool, start, args.url)
+        first = _fetch_safely(session, args, pool, start, args.url)
         outcomes.append(first)
         if first.state is not None:
             total_results = first.state.total_results
@@ -461,7 +487,14 @@ def scrape(args) -> int:
             blocked = bool(first.state and first.state.policy.blocked)
         elif first.complete_here:
             stop_reason = ("no_results" if first.state.state == page_flow.EMPTY
-                           else "listing_exhausted")
+                           else "start_page_out_of_range")
+            if stop_reason == "start_page_out_of_range":
+                # Not "the listing is empty": the URL asked for a page past the
+                # end, and the site answered with its last page instead. Nothing is
+                # concluded about the listing, so this is not a complete run.
+                logger.error("--url asks for page %d, but the site states %s "
+                             "page(s) for this listing.", start,
+                             first.state.pages_available)
         elif planned > 1:
             seen = {p.sku for p in first.products if p.sku}
             previous = first
@@ -471,7 +504,7 @@ def scrape(args) -> int:
                     pool.advance(f"per-page rotation, page {page_num}")
                     session.relaunch()
                 time.sleep(args.delay)
-                outcome = _fetch_one_page(
+                outcome = _fetch_safely(
                     session, args, pool, page_num,
                     page_flow.url_for(args.url, start, run_page))
                 outcomes.append(outcome)
@@ -531,7 +564,7 @@ def scrape(args) -> int:
                       pages_missing=[o.page_num for o in outcomes if o.lost],
                       total_results_first=counted[0] if counted else None,
                       total_results_last=counted[-1] if counted else None,
-                      pages_available=pages_available,
+                      pages_available=pages_available, start_page=start,
                       start_url=args.url, final_url=final_url)
 
 

@@ -254,7 +254,10 @@ def _stop_reason_for(state, products) -> Optional[str]:
         logger.error("0 rows parsed from a page classified as %s (%s) — that "
                      "is a parse failure, not the end of the listing.",
                      state.state, state.reason)
-        return "content_unparsed"
+        # The same two names output_writer.failure_stop_reason gives the
+        # browser engines, so a sidecar reads the same whichever wrote it.
+        return ("page_never_painted" if state.state == page_flow.UNPAINTED
+                else "content_unparsed")
     return None
 
 
@@ -284,7 +287,10 @@ def scrape(args) -> int:
         blocked = bool(state and state.policy.blocked)
     elif state.policy.complete:
         stop_reason = ("no_results" if state.state == page_flow.EMPTY
-                       else "listing_exhausted")
+                       else "start_page_out_of_range")
+        if stop_reason == "start_page_out_of_range":
+            logger.error("--url asks for page %d, but the site states %s "
+                         "page(s) for this listing.", start, state.pages_available)
     elif planned > 1:
         seen = {p.sku for p in products if p.sku}
         first_products = products
@@ -343,7 +349,7 @@ def scrape(args) -> int:
                       addressable=addressable, merge_stats=merge_stats,
                       total_results_first=counted[0] if counted else None,
                       total_results_last=counted[-1] if counted else None,
-                      pages_available=pages_available,
+                      pages_available=pages_available, start_page=start,
                       start_url=args.url, final_url=args.url)
 
 
@@ -389,7 +395,7 @@ def parse_args():
                       help="Wait for a page load state instead of specific content")
     p.add_argument("--allow-empty", action="store_true",
                    help="Write output files even when 0 rows were parsed.")
-    p.add_argument("--retries", type=cli_types.positive_int, default=1,
+    p.add_argument("--retries", type=cli_types.non_negative_int, default=1,
                    help="Extra attempts if a challenge page comes back. Each "
                         "attempt is a separate billable task, so this defaults to 1.")
     p.add_argument("--retry-delay", type=cli_types.non_negative_float, default=10,
@@ -399,9 +405,13 @@ def parse_args():
     args = p.parse_args()
     # This client uses --key and --cdp-url rather than --twocaptcha-key and
     # --cdp-endpoint, so the mapping is spelled out instead of defaulted.
+    # SCREENER_CDP_ENDPOINT is deliberately NOT mapped onto --cdp-url. It is
+    # the browser engines' endpoint, and filling it in here would route
+    # every Scraper API task through the Scraping Browser too — two products
+    # billed per page, through the exit the captures saw the registration
+    # wall from — without the user ever typing --cdp-url.
     env_config.apply(args, keys={
         "TWOCAPTCHA_KEY": "key",
-        "SCREENER_CDP_ENDPOINT": "cdp_url",
         "SCREENER_URL": "url",
     })
     cli_types.finish_args(p, args, logger)
@@ -421,4 +431,8 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
+        sys.exit(1)
+    except Exception:  # noqa: BLE001 — a traceback is a log, as in the twins
+        import traceback
+        logger.error("Crashed:\n%s", redact_secret_patterns(traceback.format_exc()))
         sys.exit(1)

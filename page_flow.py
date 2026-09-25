@@ -15,6 +15,8 @@ per engine, and letting the three drift:
                  answered with page 7                                  stop, complete
     unpainted    built out of the site's own assets, no table yet     wait, then retry
     not_found    the site's own 404 page — the URL is wrong           stop, say so
+    server_error an HTTP 5xx other than 503 — the site failing, not
+                 refusing                                             stop, exit 5
     blocked      the registration wall, a refusal status, a
                  challenge, or a page not built by the site at all    rotate, exit 3
 
@@ -48,6 +50,7 @@ EMPTY = "empty"
 EXHAUSTED = "exhausted"
 UNPAINTED = "unpainted"
 NOT_FOUND = "not_found"
+SERVER_ERROR = "server_error"
 BLOCKED = "blocked"
 
 # HTTP statuses that are a refusal rather than a page. screener.in answered
@@ -141,6 +144,12 @@ STATE_POLICY = {
     NOT_FOUND: PagePolicy(retry=False, wait_first=False, rotate_exit=False,
                           may_solve=False, blocked=False, complete=False,
                           usable=False),
+    # The site failing rather than refusing: not exit 3, and not worth a
+    # different exit or a solve. Never measured on screener.in — 0 of the
+    # requests made while writing this answered 5xx — so it is kept narrow.
+    SERVER_ERROR: PagePolicy(retry=False, wait_first=False, rotate_exit=False,
+                             may_solve=False, blocked=False, complete=False,
+                             usable=False),
     BLOCKED:   PagePolicy(retry=True, wait_first=False, rotate_exit=True,
                           may_solve=True, blocked=True, complete=False,
                           usable=False),
@@ -233,6 +242,11 @@ def classify(html: Optional[str], status_code: Optional[int] = None,
     if status_code == 404 or _NOT_FOUND_TITLE in html:
         return PageState(NOT_FOUND, "the site's own 404 page — check the URL",
                          vendor="not_found", **common)
+
+    if (isinstance(status_code, int) and status_code >= 500
+            and status_code not in REFUSAL_STATUSES):
+        return PageState(SERVER_ERROR, f"HTTP {status_code} — the site failed "
+                         f"to serve the page", vendor="server_error", **common)
 
     if status_code in REFUSAL_STATUSES:
         return PageState(BLOCKED, f"HTTP {status_code}", vendor="http", **common)

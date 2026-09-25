@@ -32,9 +32,13 @@ version of this scraper.
 - Pagination planned against the site's own "Showing page X of Y", and an
   out-of-range page detected from the page number the site says it served
   (`?page=8` of 7 is answered with page 7's real rows).
-- A `<out>.meta.json` sidecar with `status`, `coverage`
-  (exhaustive/window), the site's `total_results` and `pages_available`, and
-  `rank_gaps` computed from the site's own global row numbers.
+- A `<out>.meta.json` sidecar with `status`, `coverage` (exhaustive /
+  tail / window — `tail` for a run that reached the end from a later
+  `?page=`), `start_page`, the site's `total_results` and `pages_available`,
+  and `rank_gaps` computed from the site's own global row numbers.
+- Exit 5 for every run that never obtained its content — a timeout, a dead
+  proxy (`proxy_failed`), a 404 or 5xx, a start page past the end — and a
+  blocked or failed run never writes output, `--allow-empty` included.
 - Page states for the registration/login wall, the site's own 404, and
   Chromium's own network-error page.
 - `diff_runs.py`, which refuses to compare different listings or sort orders

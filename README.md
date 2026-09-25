@@ -93,19 +93,23 @@ run.
 **Run metadata.** Every run that writes output also writes `<out>.meta.json`:
 `status` (complete / partial), `stop_reason`, `pages_failed` by number, the
 site's own `total_results` and `pages_available`, `coverage` (`exhaustive`
-when the run reached the end of the listing, `window` when it stopped at
-`--pages`), and `rank_gaps` — site ranks missing from the merged rows, which
+when the run started at page 1 and reached the end, `tail` when it reached
+the end from a later start page, `window` when it stopped at `--pages`),
+`start_page`, and `rank_gaps` — site ranks missing from the merged rows, which
 is proof of a lost page rather than a guess.
 
 **Exit codes**, shared by every engine: `0` ok · `1` crash · `2` bad usage ·
 `3` blocked · `4` the site says the listing is empty · `5` the content was
-never obtained · `6` partial.
+never obtained (a timeout, a dead proxy, a 404 or 5xx, an API error, a start
+page past the end, a page nobody could read) · `6` partial. A blocked or
+failed run never writes output — `--allow-empty` included, which only lets
+a listing the site reports as empty write an empty file.
 
 ## Engines
 
 | Script | Engine | Measured 2026-09-25 |
 |---|---|---|
-| `playwright_scraper.py` | **Playwright** — primary | 3 pages / 75 rows; 7 of 7 pages / 164 rows; `--concurrency 2` over a 3-page screen, 64 of 64 |
+| `playwright_scraper.py` | **Playwright** — primary | 3 pages / 75 rows; 7 of 7 pages / 164 rows; a 3-page screen under `--concurrency 2` (pages 1–2 are always sequential, so one page went through the worker pool), 64 of 64 |
 | `puppeteer_scraper.py` | pyppeteer | 3 pages / 75 rows — same companies and quarterly figures as Playwright |
 | `selenium_scraper.py` | Selenium + Chrome | 3 pages / 75 rows — same companies and quarterly figures as Playwright |
 | `scraper_api_client.py` | 2Captcha Scraper API, no local browser | **not run live in this version** — no key was available; exercised offline against real captures |

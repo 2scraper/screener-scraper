@@ -27,7 +27,9 @@ change.
 ## Exit 3 — "not built by the site"
 
 The response references screener.in's asset host (`cdn-static.screener.in`)
-fewer than 5 times; every page the site serves — listings, its sign-up page,
+fewer than 5 times — a page served to the browser without a navigation
+error, since a proxy that refuses the connection is caught earlier as
+`proxy_failed`; every page the site serves — listings, its sign-up page,
 even its 404 — references it 25 times or more. The usual cause is Chromium's
 own network-error page, which carries `www.screener.in` in its `<title>` and
 so reads as a real page to any text check. It means the exit failed: check
@@ -67,13 +69,17 @@ screens, and `/screens/raw/?query=...` (HTTP 404 to an anonymous visitor on
 
 A run that finds nothing writes nothing, so a failure cannot overwrite last
 night's good data with `[]`. Exit 4 means the site itself said "0 results
-found". No such listing was found to capture while this repo was written, so
-that path is tested on a synthetic page and is unmeasured on the live site.
+found" — and only that: `--allow-empty` writes an empty file for that case
+and no other. No such listing was found to capture while this repo was
+written, so that path is tested on a synthetic page and is unmeasured on the
+live site.
 
 ## Exit 5 — the content was never obtained
 
-A navigation timeout, the site's own 404 (check the URL), or a page that
-carried a results table this code could not read. Nothing can be concluded
+A navigation timeout, a dead proxy (`stop_reason: proxy_failed` — the exit,
+not the site), the site's own 404 (check the URL), an HTTP 5xx, a `--url`
+whose `?page=` is past the last page (`start_page_out_of_range`), or a page
+that carried a results table this code could not read. Nothing can be concluded
 about the listing from such a run, which is why it is not exit 4. The log says
 which page and why; `--dump-html dump.html` writes what the parser was given.
 

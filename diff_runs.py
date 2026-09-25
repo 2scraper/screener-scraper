@@ -216,9 +216,14 @@ def _assortment_caveats(args) -> List[str]:
         if coverage == "window":
             caveats.append(
                 f"{label} ({path}) covered a WINDOW, not the whole listing: "
-                f"{meta.get('pages_completed')} page(s) requested out of "
-                f"{meta.get('total_results')} result(s). Companies past that "
-                f"window were never fetched.")
+                f"{meta.get('pages_completed')} page(s) fetched of a listing "
+                f"of {meta.get('total_results')} result(s). Companies past "
+                f"that window were never fetched.")
+        elif coverage == "tail":
+            caveats.append(
+                f"{label} ({path}) reached the end of the listing but STARTED "
+                f"at page {meta.get('start_page')}: companies on the pages "
+                f"before it were never fetched.")
         elif coverage is None:
             caveats.append(
                 f"{label} ({path}) was written before runs recorded their "
@@ -244,8 +249,9 @@ def parse_args():
                         "for a cron job that should only notify on a real diff.")
     p.add_argument("--force", action="store_true",
                    help="Diff even when a run's .meta.json says it was partial "
-                        "or failed. Products never fetched by the short run will "
-                        "appear as added/removed.")
+                        "or failed, or when the two runs read different listings "
+                        "or sort orders. Companies never fetched by one side "
+                        "will appear as added/removed.")
     return p.parse_args()
 
 

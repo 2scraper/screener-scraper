@@ -123,6 +123,11 @@ class PageOutcome:
     # Taken off the work queue and never came back: its worker died holding
     # it. Recorded so the page exists in SOME list rather than in none.
     lost: bool = False
+    # The exit (proxy) failed, as Chromium reported it — not a timeout.
+    proxy_failed: bool = False
+    # The fetch raised something no branch expected. Recorded as a failed
+    # page, so the rows already gathered are still written.
+    raised: bool = False
 
     @property
     def ok(self) -> bool:
@@ -376,6 +381,22 @@ def handle_captcha_if_present(page, args, solves: List[int]) -> None:
                     "This page was not blocked, so it is NOT reloaded.")
 
 
+def _fetch_safely(session, args, pool, page_num: int, url: str) -> PageOutcome:
+    """`_fetch_one_page`, with an unexpected driver exception recorded as a
+    failed page instead of ending the run — a target that closes on page 5
+    must not throw away pages 1-4. Same rule in every engine."""
+    try:
+        return _fetch_one_page(session, args, pool, page_num, url)
+    except (ProxyError, KeyboardInterrupt):
+        raise
+    except Exception as e:  # noqa: BLE001 — recorded, redacted, not swallowed
+        logger.error("Page %d raised %s — recording it as a failed page.",
+                     page_num, redact_secret_patterns(str(e)))
+        outcome = PageOutcome(page_num=page_num, url=url)
+        outcome.raised = True
+        return outcome
+
+
 def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome:
     """Fetch, classify and parse one page. `page_num` is the SITE page.
 
@@ -471,6 +492,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
     if load_failed:
         logger.error("Gave up loading %s after %d attempt(s).", url, args.retries)
         outcome.load_failed = True
+        outcome.proxy_failed = bool(exit_failed)
         return outcome
 
     outcome.state = state
@@ -591,9 +613,11 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                             # get_nowait already removed this page from the
                             # queue; letting the exception out would leave it
                             # in no list at all.
-                            logger.exception(
+                            import traceback
+                            logger.error(
                                 "[%s] page %d raised — recording it as a failed "
-                                "page and retiring this worker.", name, page_num)
+                                "page and retiring this worker.\n%s", name, page_num,
+                                redact_secret_patterns(traceback.format_exc()))
                             lost = PageOutcome(page_num=page_num, url=url)
                             lost.lost = True
                             with results_lock:
@@ -612,9 +636,11 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
                 finally:
                     session.close()
         except Exception:  # noqa: BLE001 — a dead worker must not hang the run
-            logger.exception("[%s] died; any page it was holding is reconciled "
-                             "into the results below, and whatever is still "
-                             "queued is reported unattempted.", name)
+            import traceback
+            logger.error("[%s] died; any page it was holding is reconciled "
+                         "into the results below, and whatever is still "
+                         "queued is reported unattempted.\n%s", name,
+                         redact_secret_patterns(traceback.format_exc()))
 
     threads = [threading.Thread(target=worker, args=(i,), name=f"page-worker-{i + 1}")
                for i in range(concurrency)]
@@ -717,7 +743,7 @@ def scrape(args) -> int:
                                   remote=bool(args.cdp_endpoint)).open()
         try:
             # Page 1 alone: its content decides whether the rest exist at all.
-            first = _fetch_one_page(session, args, pool, start, args.url)
+            first = _fetch_safely(session, args, pool, start, args.url)
             outcomes.append(first)
             if first.state is not None:
                 total_results = first.state.total_results
@@ -733,16 +759,27 @@ def scrape(args) -> int:
                 blocked = bool(first.state and first.state.policy.blocked)
             elif first.complete_here:
                 stop_reason = ("no_results" if first.state.state == page_flow.EMPTY
-                               else "listing_exhausted")
+                               else "start_page_out_of_range")
+                if stop_reason == "start_page_out_of_range":
+                    # Not "the listing is empty": the URL asked for a page past the
+                    # end, and the site answered with its last page instead. Nothing is
+                    # concluded about the listing, so this is not a complete run.
+                    logger.error("--url asks for page %d, but the site states %s "
+                                 "page(s) for this listing.", start,
+                                 first.state.pages_available)
             elif planned > 1:
                 # Page 2 is fetched sequentially whatever --concurrency says:
                 # it is what proves pages can be addressed by URL at all.
                 _between_pages(session, args, pool, 2)
-                second = _fetch_one_page(session, args, pool,
+                second = _fetch_safely(session, args, pool,
                                          page_flow.site_page(start, 2),
                                          page_flow.url_for(args.url, start, 2))
                 outcomes.append(second)
-                addressable = _addressable(first, second)
+                # Decided only by a page 2 that answered: a blocked or failed
+                # page 2 says nothing about the ?page= convention, and the
+                # twins leave it null in that case too.
+                if second.ok and not second.complete_here:
+                    addressable = _addressable(first, second)
 
                 if not second.ok:
                     stop_reason = failure_stop_reason(second)
@@ -797,7 +834,7 @@ def scrape(args) -> int:
                         seen = {p.sku for o in outcomes for p in o.products if p.sku}
                         for page_num, url in specs:
                             _between_pages(session, args, pool, page_num)
-                            outcome = _fetch_one_page(session, args, pool, page_num, url)
+                            outcome = _fetch_safely(session, args, pool, page_num, url)
                             outcomes.append(outcome)
                             if not outcome.ok:
                                 stop_reason = failure_stop_reason(outcome)
@@ -863,7 +900,7 @@ def _finish(args, outcomes, blocked, stop_reason, total_results,
                       merge_stats=merge_stats,
                       total_results_first=counted[0] if counted else None,
                       total_results_last=counted[-1] if counted else None,
-                      pages_available=pages_available,
+                      pages_available=pages_available, start_page=args.start_page,
                       start_url=args.url, final_url=final_url)
 
 

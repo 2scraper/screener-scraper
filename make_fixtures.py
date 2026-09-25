@@ -70,6 +70,12 @@ SOURCES = {
     # needing — the marker set must score zero on it.
     "cdp_register_wall": ("cdp_register_wall_2026-08-24.html",
                           "https://www.screener.in/register/", None),
+    # The same wall as the Scraper API returned it (2026-08-23): the HTTP
+    # client only knows the URL it ASKED for, so this one is classified with
+    # a /screens/ URL — which is what exercises the wall's form detection
+    # rather than the /register/ path.
+    "scraperapi_register_wall": ("scraperapi_register_wall_2026-08-23.html",
+                                 "https://www.screener.in/screens/59/magic-formula/", None),
     # Chromium's own network-error page, captured through Selenium with a
     # proxy that refuses connections. Carries the site's hostname in its
     # title and not one reference to the site's assets.
@@ -176,6 +182,12 @@ def main() -> int:
     ap.add_argument("--check", action="store_true",
                     help="verify the committed file matches the captures")
     args = ap.parse_args()
+    if not CAPTURES.is_dir():
+        # captures/ is git-ignored on purpose (session material), so a clone
+        # has none. Say that, rather than reporting every fixture as broken.
+        print("captures/ is not here — it is never committed. make_fixtures.py "
+              "can only build or --check where the raw captures exist.")
+        return 2
     fixtures, problems = build()
     if problems:
         for p in problems:

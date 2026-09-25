@@ -57,8 +57,15 @@ _SUPPORTED_SCHEMES = ("http", "https", "socks5")
 # below removes — globally, not once: a masker that handles the first
 # occurrence prints the password the other four times and looks like it is
 # working.
-_CREDENTIAL_URL_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^\s/@:]+:[^\s/@]+(@)",
+# Everything between the scheme and the LAST "@" of the authority — so a
+# password that itself contains "@" is masked whole, and a URL carrying only a
+# user part (a bare token before "@") is masked too. Stops at "/", whitespace
+# and quotes, which is where an authority ends.
+_CREDENTIAL_URL_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^\s/\"'<>]*(@)",
                                 re.IGNORECASE)
+# The Scraper API's key rides in an Authorization header; requests can quote
+# a header value back in an exception (InvalidHeader).
+_BEARER_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]{8,}", re.IGNORECASE)
 _KEY_PARAM_RE = re.compile(
     r"\b((?:client)?key|token|api[_-]?key|password)=[^&\s\"'<>]+", re.IGNORECASE)
 # The same secrets as JSON fields — `"apiKey": "..."`, `"password":"..."`,
@@ -78,6 +85,7 @@ def redact_secret_patterns(text: str) -> str:
     """
     text = _CREDENTIAL_URL_RE.sub(r"\1***:***\2", text)
     text = _KEY_JSON_RE.sub(lambda m: m.group(1) + "***", text)
+    text = _BEARER_RE.sub(lambda m: m.group(1) + "***", text)
     return _KEY_PARAM_RE.sub(lambda m: m.group(1) + "=***", text)
 
 

@@ -156,13 +156,13 @@ def _cell(value):
 def csv_safe(value):
     """Neutralise a spreadsheet formula in a scraped string.
 
-    Every text column in a row here is written by whoever listed the business:
-    a title of `=HYPERLINK("http://...","Click")` is an active formula the
+    Every text column in a row here is site-controlled text — a company
+    name, a screen's own heading: a title of `=HYPERLINK("http://...","Click")` is an active formula the
     moment the CSV is opened in Excel, Sheets or LibreOffice, and the CSV is
     exactly what this project tells people to open there.
 
     Only `str` values are touched. The numeric columns keep their type and
-    their sign — monthly_profit is legitimately negative, and prefixing a
+    their sign — profit growth is legitimately negative, and prefixing a
     number would corrupt the column to fix an injection that a number cannot
     carry in the first place.
     """
@@ -258,6 +258,8 @@ def failure_stop_reason(outcome) -> str:
     """
     if getattr(outcome, "lost", False):
         return "worker_lost_page"
+    if getattr(outcome, "raised", False):
+        return "page_fetch_raised"
     if getattr(outcome, "parse_failed", False):
         # Two different failures reach here and a reader needs to tell them
         # apart: a page that never painted is an infrastructure problem, a
@@ -271,9 +273,18 @@ def failure_stop_reason(outcome) -> str:
         state = getattr(outcome, "state", None)
         painted = state is not None and state.state != page_flow.UNPAINTED
         return "content_unparsed" if painted else "page_never_painted"
+    if getattr(outcome, "proxy_failed", False):
+        # A dead exit is not a timeout: they want opposite responses, and a
+        # sidecar saying "timeout" sends the reader looking at the site.
+        return "proxy_failed"
     if getattr(outcome, "load_failed", False):
         return "page_load_timeout"
     state = getattr(outcome, "state", None)
+    if state is not None and not state.policy.blocked:
+        # Not a block — a 404, a server error, a start page past the end.
+        # Named by the state, never with a "blocked_" prefix that would send
+        # a reader to buy a proxy for a typo.
+        return f"page_{state.state}"
     return f"blocked_{(state.vendor if state else None) or 'unknown'}"
 
 
@@ -338,7 +349,8 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
              total_results_last: Optional[int] = None,
              catalog_mutated: Optional[bool] = None,
              pages_available: Optional[int] = None,
-             rank_gaps: Optional[List[List[int]]] = None) -> dict:
+             rank_gaps: Optional[List[List[int]]] = None,
+             start_page: int = 1) -> dict:
     """Build the metadata dict for a finished run.
 
     `status` is the field a consumer branches on:
@@ -370,8 +382,11 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     questions. `status` says whether the run got what it was asked for;
     `coverage` says what it was asked for:
 
-      exhaustive — the run reached the end of the listing. Nothing exists
-                   beyond what is in this file.
+      exhaustive — the run started at page 1 and reached the end of the
+                   listing. Nothing exists beyond what is in this file.
+      tail       — the run reached the end, but started part-way (a --url
+                   carrying ?page=N): pages before `start_page` were never
+                   fetched. A window, as far as a diff is concerned.
       window     — the run fetched the --pages it was given and stopped
                    there. Listings beyond that window exist and were never
                    looked at, so a listing absent from this file may simply
@@ -413,6 +428,7 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "total_results_last": total_results_last,
         "catalog_mutated": catalog_mutated,
         "rank_gaps": rank_gaps or [],
+        "start_page": start_page,
         "start_url": start_url,
         "final_url": final_url,
         "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -478,7 +494,8 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
                merge_stats: Optional[MergeStats] = None,
                total_results_first: Optional[int] = None,
                total_results_last: Optional[int] = None,
-               pages_available: Optional[int] = None) -> int:
+               pages_available: Optional[int] = None,
+               start_page: int = 1) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all engines so the status/exit-code mapping cannot drift between
@@ -512,7 +529,12 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
 
     complete = (stop_reason in COMPLETE_STOP_REASONS
                 and not missing and not unaccounted)
-    coverage = ("exhaustive" if stop_reason in EXHAUSTIVE_STOP_REASONS else
+    # "exhaustive" only for a run that STARTED at page 1: a run started on
+    # ?page=3 that reached the end holds pages 3..N, and calling that the
+    # whole listing would let diff_runs.py report pages 1-2 as removed. That
+    # run is a "tail" — complete, and a window as far as a diff is concerned.
+    coverage = (("exhaustive" if start_page <= 1 else "tail")
+                if stop_reason in EXHAUSTIVE_STOP_REASONS else
                 "window" if stop_reason == "completed" else None)
     catalog_mutated = (None if total_results_first is None or total_results_last is None
                        else total_results_first != total_results_last)
@@ -531,8 +553,12 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
               + ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in gaps)
               + ". Rows the site numbered never arrived; recorded as "
                 "rank_gaps in the metadata.")
-    rc = save(products, out_prefix, fmt, allow_empty=allow_empty)
-    wrote_output = bool(products) or allow_empty
+    # --allow-empty covers ONE case: a listing the site itself reported as
+    # empty. A blocked or failed run with nothing in it must never replace
+    # the previous good output with [] — --allow-empty or not.
+    may_write_empty = allow_empty and complete and not blocked
+    rc = save(products, out_prefix, fmt, allow_empty=may_write_empty)
+    wrote_output = bool(products) or may_write_empty
 
     if wrote_output:
         status = "complete" if (products and complete) else (
@@ -554,7 +580,7 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
             total_results_first=total_results_first,
             total_results_last=total_results_last,
             catalog_mutated=catalog_mutated, pages_available=pages_available,
-            rank_gaps=gaps,
+            rank_gaps=gaps, start_page=start_page,
             start_url=start_url, final_url=final_url, products=len(products)))
 
     if not products:
