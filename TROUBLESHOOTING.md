@@ -17,7 +17,8 @@ a refusal status (it is HTTP 200). What the evidence in this repo shows:
 * Captures taken on 2026-08-23/24 by this repo's first version — through the
   Scraping Browser API and through the Scraper API — landed on `/register/`
   for `/screens/` URLs. `/market/` sector pages were not redirected in any
-  capture.
+  capture, and on 2026-09-28 both products were served page 1 of a sector in
+  full.
 
 So the exit is the likely variable. Try, in order: no `--cdp-endpoint` from an
 ordinary connection; then `--proxy` with a residential Indian exit. If you do
@@ -161,4 +162,7 @@ Run `python3 fingerprint_client.py --explain`, with the key exported as
 `TWOCAPTCHA_KEY`. It prints, field by field, which response key each setting
 came from and which settings could not be applied at all. If it answers
 **403**, the key is not subscribed to fingerprints — a separate product from
-captcha solving. `--fingerprint` is implemented in the Playwright engine only.
+captcha solving. Measured 2026-09-28: a key with a working solving balance
+got 403, and a scraper run with `--fingerprint` then stops with **exit 5**
+and says so, before any page is fetched. Drop `--fingerprint`, or enable the
+subscription. `--fingerprint` is implemented in the Playwright engine only.

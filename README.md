@@ -55,17 +55,20 @@ taken on 2026-08-23/24 through the Scraping Browser API and the Scraper API
 landed on screener.in's `/register/` page for `/screens/` URLs (and not for
 `/market/` ones). The scraper recognises that page, reports it as blocked
 (exit 3) with advice, and never parses it as an empty screen. It is not a
-captcha: no widget is on it for any solver.
+captcha: no widget is on it for any solver. On 2026-09-28 the Scraping
+Browser API and the Scraper API were each served page 1 of a `/market/`
+sector in full — 25 rows, identical to a local run — so the wall is not
+every request through them; `/screens/` was not re-measured.
 
 What each 2Captcha product (one key, four separately billed products) buys on
 this site:
 
 | Product | What it buys here |
 |---|---|
-| **Proxies** ([2captcha.com/proxy](https://2captcha.com/proxy), also sold as 2prx.com) | Volume from many addresses, and an Indian exit. `--proxy`, `--proxy-file`, `--proxy-rotate per-page`, and per-worker exits under `--concurrency`. |
-| **Scraping Browser API** | No browser infrastructure of your own, a chosen exit country, and a persistent profile. `--cdp-endpoint`. Given the captures above, try a plain connection first for `/screens/`. |
-| **Fingerprints** | A complete device identity for the launched browser (`--fingerprint`, Playwright engine). Not needed for anything measured here, and not run live in this version. |
-| **Captcha solving** | Nothing on this site as measured — no captcha is configured on any page captured. It is wired in and bounded to one solve per page anyway, because a site can switch one on between deploys. |
+| **Proxies** ([2captcha.com/proxy](https://2captcha.com/proxy), also sold as 2prx.com) | Volume from many addresses, and an Indian exit. `--proxy`, `--proxy-file`, `--proxy-rotate per-page`, and per-worker exits under `--concurrency`. Measured 2026-09-28: page 1 through a European 2Captcha exit, 25 rows, from Playwright and from `http_scraper.py` alike. |
+| **Scraping Browser API** | No browser infrastructure of your own, a chosen exit country, and a persistent profile. `--cdp-endpoint`. Measured 2026-09-28: page 1 of a sector, 25 rows, with `Captcha.setAutoSolve` enabled on connect. Given the August captures, try a plain connection first for `/screens/`. |
+| **Fingerprints** | A complete device identity for the launched browser (`--fingerprint`, Playwright engine). Not needed for anything measured here. **A separate subscription:** on 2026-09-28 a key with a working solving balance got HTTP 403 from `/fingerprint/random`, and the run stops with exit 5 and that reason. Applying a real fingerprint is therefore still unverified. |
+| **Captcha solving** | Nothing on this site as measured — no captcha is configured on any page captured. It is wired in and bounded to one solve per page anyway, because a site can switch one on between deploys. Verified 2026-09-28 on 2Captcha's own reCAPTCHA v2 demo page: detected as v2 from the markup and at runtime, solved through API v2 (~6 s) and v1 (~38 s), and accepted by the page's server-side check. Before 0.1.1 the runtime detector never ran and an explicit v2 widget was read as v3. |
 
 ## What it extracts
 
