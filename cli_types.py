@@ -21,6 +21,15 @@ from urllib.parse import urlparse
 # say what it found. A typo'd host is the case this catches.
 EXPECTED_HOST_SUFFIX = "screener.in"
 
+# screener.in's robots.txt disallows `/*?page=` for every user agent (read
+# 2026-09-25), which is every page after the first of any listing, and its
+# Terms license personal, non-commercial viewing only.
+ROBOTS_PAGE_WARNING = (
+    "This run requests ?page= URLs, which screener.in's robots.txt disallows "
+    "for all user agents, and its Terms permit personal, non-commercial use "
+    "only. Read both before running multi-page jobs (README, \"Legal\"); "
+    "--pages 1 from the listing's own URL stays within robots.txt.")
+
 
 def positive_int(value: str) -> int:
     """An int >= 1. For counts where zero means "do nothing, silently"."""
@@ -113,6 +122,11 @@ def finish_args(parser, args, logger, env_hint: str = "SCREENER_URL") -> None:
                      f"different page for that than it names. Drop it, or "
                      f"use a whole number from 1.")
     args.start_page = product_parser.requested_page_number(args.url)
+    if host_is_expected(args.url) and (args.start_page > 1 or args.pages > 1):
+        # Warned, not refused: whether and how to comply is the operator's
+        # decision (README, "Legal"). But it is made here, where it applies,
+        # rather than left to a paragraph at the end of the README.
+        logger.warning(ROBOTS_PAGE_WARNING)
     if args.start_page > 1:
         logger.info("--url starts at page %d of the listing; this run fetches "
                     "pages %d-%d.", args.start_page, args.start_page,

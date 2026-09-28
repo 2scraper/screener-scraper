@@ -35,6 +35,8 @@ import logging
 import os
 from pathlib import Path
 
+from proxy_pool import install_log_redaction, redact_secret_patterns
+
 logger = logging.getLogger(__name__)
 
 # Recognised keys, and which CLI destination each one backs.
@@ -45,6 +47,10 @@ ENV_KEYS = {
     "SCREENER_PROXY": "proxy",
     "SCREENER_URL": "url",
 }
+# The destinations whose value is a credential, or a URL that carries one.
+# `python3 env_config.py` never prints these, whatever the value looks like.
+_CREDENTIAL_DESTS = frozenset({"twocaptcha_key", "cdp_endpoint", "proxy"})
+
 # Deliberately NOT here: an output prefix. `--out` already carries a non-empty
 # default, so `apply()` would never see it as unset and the variable would be
 # silently ignored — a setting that looks configurable and is not.
@@ -244,6 +250,7 @@ if __name__ == "__main__":
     # `python3 env_config.py` — report what is configured, without printing
     # any secret. Useful as a first step when a key "isn't being picked up".
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    install_log_redaction()
     where = load_env()
     print(f".env file:      {where or 'not found (this is fine — env vars still work)'}")
     for env_name, dest in ENV_KEYS.items():
@@ -252,10 +259,13 @@ if __name__ == "__main__":
         if value is None:
             state = ("placeholder only (treated as unset)"
                      if raw and raw.strip() else "not set")
-        elif "KEY" in env_name or "@" in value:
+        elif dest in _CREDENTIAL_DESTS:
+            # Hidden by WHAT the variable is, not by what its value looks
+            # like: the old test ("@" in the value) printed a CDP endpoint or
+            # proxy that carries its token in the query string in clear.
             state = f"set ({len(value)} chars, hidden)"
         else:
-            state = f"set ({value})"
+            state = f"set ({redact_secret_patterns(value)})"
         print(f"  {env_name:<22} -> --{dest.replace('_', '-'):<16} {state}")
     extras = unknown_keys()
     if extras:

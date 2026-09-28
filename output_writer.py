@@ -34,9 +34,11 @@ that) while no column a screen shows is thrown away.
 """
 
 import csv
+import hashlib
 import json
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -317,6 +319,23 @@ EXIT_FETCH_FAILED = 5
 EXIT_API_ERROR = EXIT_FETCH_FAILED
 
 
+# Bumped when a field of the sidecar changes meaning or disappears; adding a
+# field is not a bump. 1 = the first version that carries it.
+SCHEMA_VERSION = 1
+
+
+def file_digest(path: str) -> dict:
+    """{"file", "bytes", "sha256"} for one written output file."""
+    h = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+            size += len(chunk)
+    return {"file": os.path.basename(path), "bytes": size,
+            "sha256": h.hexdigest()}
+
+
 def write_run_meta(out_prefix: str, meta: dict) -> str:
     """Write a run-metadata sidecar next to the output, return its path.
 
@@ -350,7 +369,9 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
              catalog_mutated: Optional[bool] = None,
              pages_available: Optional[int] = None,
              rank_gaps: Optional[List[List[int]]] = None,
-             start_page: int = 1) -> dict:
+             start_page: int = 1,
+             engine: Optional[str] = None,
+             files: Optional[Dict[str, dict]] = None) -> dict:
     """Build the metadata dict for a finished run.
 
     `status` is the field a consumer branches on:
@@ -409,6 +430,14 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     count alone cannot answer that.
     """
     return {
+        "schema_version": SCHEMA_VERSION,
+        # One id per run, and the files it wrote with their digests: the three
+        # files are each written atomically but not as a SET, so a crash
+        # between them leaves new data beside an older sidecar. diff_runs.py
+        # checks these digests and refuses a set that does not belong together.
+        "run_id": str(uuid.uuid4()),
+        "engine": engine,
+        "files": files or {},
         "source": SOURCE,
         "status": status,
         "stop_reason": stop_reason,
@@ -495,7 +524,8 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
                total_results_first: Optional[int] = None,
                total_results_last: Optional[int] = None,
                pages_available: Optional[int] = None,
-               start_page: int = 1) -> int:
+               start_page: int = 1,
+               engine: Optional[str] = None) -> int:
     """Write output + the run-metadata sidecar; return the exit code.
 
     Shared by all engines so the status/exit-code mapping cannot drift between
@@ -581,7 +611,10 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
             total_results_last=total_results_last,
             catalog_mutated=catalog_mutated, pages_available=pages_available,
             rank_gaps=gaps, start_page=start_page,
-            start_url=start_url, final_url=final_url, products=len(products)))
+            start_url=start_url, final_url=final_url, products=len(products),
+            engine=engine,
+            files={ext: file_digest(f"{out_prefix}.{ext}")
+                   for ext in ("json", "csv") if fmt in (ext, "both")}))
 
     if not products:
         # Nothing gathered at all, and WHY decides the code — three different

@@ -61,7 +61,11 @@ _SUPPORTED_SCHEMES = ("http", "https", "socks5")
 # password that itself contains "@" is masked whole, and a URL carrying only a
 # user part (a bare token before "@") is masked too. Stops at "/", whitespace
 # and quotes, which is where an authority ends.
-_CREDENTIAL_URL_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^\s/\"'<>]*(@)",
+#
+# `:\\?/\\?/`, not `://`: a URL inside a JSON string may have its slashes
+# escaped (`ws:\/\/login:secret@host`, legal JSON and what some serialisers
+# emit), and the literal-`://` version left that credential in clear.
+_CREDENTIAL_URL_RE = re.compile(r"([a-z][a-z0-9+.\-]*:\\?/\\?/)[^\s/\"'<>]*(@)",
                                 re.IGNORECASE)
 # The Scraper API's key rides in an Authorization header; requests can quote
 # a header value back in an exception (InvalidHeader).
@@ -87,6 +91,36 @@ def redact_secret_patterns(text: str) -> str:
     text = _KEY_JSON_RE.sub(lambda m: m.group(1) + "***", text)
     text = _BEARER_RE.sub(lambda m: m.group(1) + "***", text)
     return _KEY_PARAM_RE.sub(lambda m: m.group(1) + "=***", text)
+
+
+class RedactingFilter(logging.Filter):
+    """Pass every log record through `redact_secret_patterns` on its way out.
+
+    The per-call-site rule ("redact before you log") held at most sites and
+    not at all of them: a retry warning, a screenshot failure and a content
+    read each logged a raw driver exception, and Chromium puts the proxy it
+    was using into its error text. A handler filter cannot be forgotten at
+    the next call site — it sees the FINAL message, arguments substituted,
+    traceback included.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = redact_secret_patterns(message)
+        if redacted != message:
+            record.msg, record.args = redacted, None
+        if record.exc_info and not record.exc_text:
+            import traceback
+            text = "".join(traceback.format_exception(*record.exc_info))
+            record.exc_text = redact_secret_patterns(text.rstrip("\n"))
+        return True
+
+
+def install_log_redaction() -> None:
+    """Attach RedactingFilter to every root handler (idempotent)."""
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, RedactingFilter) for f in handler.filters):
+            handler.addFilter(RedactingFilter())
 
 
 class ProxyError(ValueError):

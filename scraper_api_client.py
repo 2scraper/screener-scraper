@@ -63,11 +63,12 @@ import requests
 import cli_types
 import env_config
 import page_flow
-from output_writer import EXIT_API_ERROR, finish_run, merge_pages
+from output_writer import finish_run, merge_pages
 from product_parser import parse_products
-from proxy_pool import redact_secret_patterns
+from proxy_pool import install_log_redaction, redact_secret_patterns
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+install_log_redaction()
 logger = logging.getLogger("scraper_api_client")
 
 API_BASE = "https://scraper.2captcha.com"
@@ -166,6 +167,19 @@ def _fetch_page(args, page_num: int, url: str):
     for attempt in range(1, max(1, args.retries + 1) + 1):
         try:
             html, upstream = fetch_html(args, url)
+        except requests.ConnectionError as e:
+            # The request never reached the API, so no task ran and nothing
+            # was billed: the one network error a retry is free for. A read
+            # TIMEOUT is not retried — the task may have run and been billed.
+            if attempt <= args.retries:
+                logger.warning("Could not reach the Scraper API (%s) — "
+                               "retrying in %.1fs.",
+                               redact_secret_patterns(str(e)), args.retry_delay)
+                time.sleep(args.retry_delay)
+                continue
+            logger.error("Network error talking to the Scraper API: %s",
+                         redact_secret_patterns(str(e)))
+            return None, []
         except requests.RequestException as e:
             logger.error("Network error talking to the Scraper API: %s",
                          redact_secret_patterns(str(e)))
@@ -184,10 +198,15 @@ def _fetch_page(args, page_num: int, url: str):
                                    requested_page=page_num)
         logger.info("Page %d is %s.", page_num, state)
 
-        if state.policy.blocked and attempt <= args.retries:
-            logger.warning("Blocked (%s) on attempt %d — retrying in %ds. A "
-                           "challenge page is not a final answer.",
-                           state.reason, attempt, args.retry_delay)
+        # The policy table decides WHETHER a refetch could help; this client
+        # has no exit to rotate and no page to wait on, so its only form of
+        # retry is a new task — each one a separate API call from the API's
+        # own exits, which is why it is worth it here and not from a single
+        # local address.
+        if state.policy.retry and attempt <= args.retries:
+            logger.warning("Page %d is %s (%s) on attempt %d — retrying in "
+                           "%.1fs.", page_num, state.state, state.reason,
+                           attempt, args.retry_delay)
             time.sleep(args.retry_delay)
             continue
 
@@ -350,7 +369,8 @@ def scrape(args) -> int:
                       total_results_first=counted[0] if counted else None,
                       total_results_last=counted[-1] if counted else None,
                       pages_available=pages_available, start_page=start,
-                      start_url=args.url, final_url=args.url)
+                      start_url=args.url, final_url=args.url,
+                      engine="scraper_api")
 
 
 def parse_args():

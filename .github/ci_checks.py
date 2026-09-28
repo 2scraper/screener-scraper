@@ -45,33 +45,61 @@ FABRICATION_MARKERS = ("sample-product-", "example brand", "sample product",
                        "product description text", "lorem ipsum",
                        "your_api_key", "123456789")
 
-# A URL carrying real credentials — the shape is scheme://something:something@host
-# (deliberately not spelled out as an example here: this file scans itself, and
-# an illustrative credential in a comment is a false positive that turns the
-# build red for no reason. It happened on the first run.)
-CREDENTIALLED_URL = re.compile(r"(?:ws|wss|https?)://[^\s\"'/]+:[^\s\"'/]+@")
+# A URL carrying credentials: scheme://USERINFO@host, where USERINFO is
+# either `login:secret` or a bare token (a token-only CDP endpoint is written
+# that way). The userinfo is CAPTURED, because the allowlist
+# below is judged against it and nothing else — see _credential_findings.
+# (No example is spelled out here: this file scans itself.)
+CREDENTIALLED_URL = re.compile(
+    r"(?:wss?|https?|socks[45]h?)://([^\s\"'/@<>\\]+)@(?=[\w\[{])", re.I)
 
 # Documented placeholders and test values, which are SUPPOSED to look like the
-# real thing — that is the point of them. Each entry earns its place by being
-# in a line whose job is to show the shape of a credential or to prove the
-# masker removes one; a real secret matches none of these.
+# real thing — that is the point of them. Matched against the USERINFO of the
+# URL, EXACTLY, never as a substring of the line.
 #
-# Kept as an explicit list rather than a loose pattern so that adding one is a
-# decision. The alternative — a regex broad enough to cover them all — would
-# also cover a real login.
-CREDENTIAL_ALLOWED = (
+# The line-substring version this replaces exempted a whole line as soon as
+# `***` or `user:pass` appeared anywhere in it — so `user:password9@` (which
+# contains "user:pass") and any real URL on a line that also printed a masked
+# one both passed. An exact match on the userinfo cannot be widened by what
+# else is on the line.
+CREDENTIAL_ALLOWED = frozenset({
     # documentation placeholders
     "USER:PASS", "user:pass", "ACCOUNT:PASSWORD", "LOGIN:PASSWORD",
-    "{login}", "{user}", "password}@", "***", "u:p@h",
-    "login:password@host:port",     # the shape a refusal message prints
-    "user:secret@",                 # the proxy-pool masking fixtures
-    "u:supersecret@", "login:supersecret@",   # the redaction fixtures
-    "u:pass@h1", "u:pass@h2",       # the global-masking fixture
+    "login:password",               # the shape a refusal message prints
+    "***:***", "u:p",               # what the masker prints
+    "user:secret",                  # the proxy-pool masking fixtures
+    "u:supersecret", "login:supersecret",     # the redaction fixtures
+    "u:pass",                       # the global-masking fixture
+    "user:p",                       # the "password contains @" fixture
+    "TOKEN123456",                  # the token-only masking fixture
     "only:1",                       # a one-exit pool fixture
-)
+})
 
-# A 2captcha API key is a 32-character hex string.
-HEX32 = re.compile(r"\b[0-9a-f]{32}\b")
+# A userinfo whose SECRET half is a template slot — `{password}` or `***` —
+# is documentation whatever the login half says: the vendor documents the
+# Scraping Browser login as `{login}-zone-…-pid-{profileId}`.
+_PLACEHOLDER_SECRET = re.compile(r"\{[A-Za-z_]+\}|\*+")
+
+
+def _credential_findings(line):
+    """Every credentialled URL on this line whose userinfo is not allowed."""
+    bad = []
+    for match in CREDENTIALLED_URL.finditer(line):
+        userinfo = match.group(1)
+        secret = userinfo.split(":", 1)[1] if ":" in userinfo else userinfo
+        if userinfo in CREDENTIAL_ALLOWED or _PLACEHOLDER_SECRET.fullmatch(secret):
+            continue
+        bad.append(userinfo)
+    return bad
+
+
+# A 2captcha API key is a 32-character hex string. Either case: a key pasted
+# from a dashboard that prints it upper-case is still a key, and `\b` alone
+# let `…_<hex>` through because `_` is a word character.
+HEX32 = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32}(?![0-9A-Za-z])")
+
+# A bearer token written out in full. The Scraper API takes its key this way.
+BEARER = re.compile(r"\bBearer\s+(?!\{|\*|<|REDACTED)[A-Za-z0-9._~+/=-]{20,}")
 
 # EMPTY, DELIBERATELY. screener.in publishes no 32-hex identifier that this
 # schema reads: its ids are short integers (data-row-company-id) and its
@@ -107,9 +135,12 @@ def _without_site_ids(line):
     return line
 
 
-# Contexts in which a 32-hex string is plainly not a key.
-HEX32_ALLOWED = ("sha", "hash", "nonce", "example", "md5", "digest",
-                 "checksum")
+# Contexts in which a 32-hex string is plainly not a key — matched as WORDS.
+# As substrings they exempted any line with "shares", "shape", "hashtag" or
+# "example" in it, and a financial-data repo writes "shares" constantly.
+HEX32_ALLOWED = re.compile(
+    r"\b(?:sha(?:1|224|256|384|512)?|hash|nonce|md5|digest|checksum|integrity)\b",
+    re.I)
 
 # Generated data files exempt from the bare-hex rule. EMPTY, and that is the
 # stricter arrangement: screener.in publishes no 32-hex identifier, and
@@ -378,10 +409,11 @@ def secret_check():
                 path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             rel = path.relative_to(REPO)
 
-            if CREDENTIALLED_URL.search(line) and not any(
-                    token in line for token in CREDENTIAL_ALLOWED):
+            if _credential_findings(line):
                 failed.append(f"{rel}:{lineno} looks like a URL with real "
                               f"credentials in it")
+            if BEARER.search(line):
+                failed.append(f"{rel}:{lineno} carries a bearer token")
 
             # Applies everywhere, generated data included — this is the rule
             # the bare-hex one was reaching for, said precisely.
@@ -393,7 +425,7 @@ def secret_check():
                 continue
 
             for match in HEX32.findall(_without_site_ids(line)):
-                if any(token in line.lower() for token in HEX32_ALLOWED):
+                if HEX32_ALLOWED.search(line):
                     continue
                 # A value already decided for the history scan is decided
                 # here too — and this branch is not hypothetical: writing
@@ -494,12 +526,14 @@ def history_check():
                               capture_output=True, text=True,
                               errors="replace").stdout
         for lineno, line in enumerate(body.splitlines(), 1):
-            if CREDENTIALLED_URL.search(line) and not any(
-                    token in line for token in CREDENTIAL_ALLOWED):
+            if _credential_findings(line):
                 failed.append(f"{path}:{lineno} (in a past commit) looks like "
                               f"a URL with real credentials in it")
+            if BEARER.search(line):
+                failed.append(f"{path}:{lineno} (in a past commit) carries a "
+                              f"bearer token")
             for match in HEX32.findall(_without_site_ids(line)):
-                if any(token in line.lower() for token in HEX32_ALLOWED):
+                if HEX32_ALLOWED.search(line):
                     continue
                 if match in HISTORY_DECIDED:
                     decided.append(f"{path}:{lineno} {match[:6]}… — "

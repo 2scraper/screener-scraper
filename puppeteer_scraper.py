@@ -66,9 +66,11 @@ from output_writer import failure_stop_reason, finish_run, merge_pages
 from product_parser import SELECTORS, parse_products
 from proxy_pool import (ROTATE_MODES, ProxyError, check_exit_or_raise,
                         from_args as proxy_pool_from_args, mask,
-                        redact_secret_patterns, to_pyppeteer)
+                        install_log_redaction, redact_secret_patterns,
+                        to_pyppeteer)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+install_log_redaction()
 logger = logging.getLogger("puppeteer_scraper")
 
 # --- the whole of this engine's site knowledge, identical to its twins' -----
@@ -607,7 +609,8 @@ async def _scrape(args) -> int:
                       total_results_first=counted[0] if counted else None,
                       total_results_last=counted[-1] if counted else None,
                       pages_available=pages_available, start_page=start,
-                      start_url=args.url, final_url=final_url)
+                      start_url=args.url, final_url=final_url,
+                      engine="puppeteer")
 
 
 def scrape(args) -> int:

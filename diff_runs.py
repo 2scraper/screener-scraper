@@ -136,6 +136,30 @@ def _run_status(path: str) -> Tuple[Optional[str], Optional[dict]]:
     return meta.get("status"), meta
 
 
+def _sidecar_mismatch(path: str, meta: dict) -> Optional[str]:
+    """Why this JSON is not the file its sidecar describes, or None.
+
+    The JSON, the CSV and the sidecar are each written atomically, but not as
+    a set: a crash between them leaves a new JSON beside the previous run's
+    sidecar, which then vouches for data it never saw. Sidecars since
+    schema_version 1 record each file's digest, and that is checked here.
+    An older sidecar has no digest and is taken as it is.
+    """
+    want = (meta.get("files") or {}).get("json")
+    if not want or not want.get("sha256"):
+        return None
+    from output_writer import file_digest
+    try:
+        got = file_digest(path)
+    except OSError as e:
+        return f"cannot be read to check it against its sidecar ({e})"
+    if got["sha256"] != want["sha256"]:
+        return (f"does not match its .meta.json (run {meta.get('run_id')}): "
+                f"the data file was rewritten after the sidecar, or the two "
+                f"come from different runs")
+    return None
+
+
 def _listing_key(url: Optional[str]) -> Optional[str]:
     """A run's listing, reduced to what makes two runs the same question.
 
@@ -169,6 +193,9 @@ def _check_comparable(args) -> bool:
             listings.append((label, _listing_key(meta.get("start_url"))))
         if status is None:
             continue  # no sidecar: nothing to check, see _run_status
+        mismatch = _sidecar_mismatch(path, meta)
+        if mismatch:
+            problems.append(f"{label} ({path}) {mismatch}")
         if status != "complete":
             problems.append(
                 f"{label} ({path}) was a {status!r} run — stopped after "
@@ -183,9 +210,9 @@ def _check_comparable(args) -> bool:
     if not problems:
         return True
 
-    print("[!] Refusing to diff: at least one run is not a complete view of "
-          "the listing, so listings that were never fetched cannot be told "
-          "apart from ones that left the listing.")
+    print("[!] Refusing to diff: at least one run cannot be read as a "
+          "complete, self-consistent view of the listing, so listings that "
+          "were never fetched cannot be told apart from ones that left it.")
     for line in problems:
         print(f"      {line}")
     print("    Re-run the incomplete side, or pass --force to compare anyway "
