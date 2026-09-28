@@ -38,6 +38,35 @@ import passes.
 
 If the suite fails on a clean clone, that is itself the bug — say so.
 
+## Dependencies: `.txt` is the spec, `.lock` is what gets installed
+
+`requirements*.txt` hold the loose `>=` floors a person edits. Each has a
+`.lock` beside it — exact versions and hashes, resolved for every Python from
+3.9 up — and CI, the canary and the Docker image install only the locks, with
+`--require-hashes`. `smoke_test.py` fails if a workflow installs anything
+else, if a lock no longer satisfies its `.txt`, or if an action is referenced
+by tag instead of by commit SHA.
+
+After changing a `.txt`, or when `audit.yml` reports an advisory, regenerate
+the locks with [uv](https://docs.astral.sh/uv/) — the exact command is also in
+each lock's header:
+
+```bash
+uv pip compile --universal --python-version 3.9 --generate-hashes --annotation-style line \
+    requirements.txt -o requirements.lock
+uv pip compile --universal --python-version 3.9 --generate-hashes --annotation-style line \
+    requirements.txt requirements-playwright.txt -o requirements-playwright.lock
+uv pip compile --universal --python-version 3.9 --generate-hashes --annotation-style line \
+    requirements.txt requirements-puppeteer.txt -o requirements-puppeteer.lock
+uv pip compile --universal --python-version 3.9 --generate-hashes --annotation-style line \
+    requirements.txt requirements-selenium.txt -o requirements-selenium.lock
+uv pip compile --universal --python-version 3.9 --generate-hashes --annotation-style line \
+    requirements.txt .github/requirements-ci.txt -o .github/requirements-ci.lock
+```
+
+Actions are pinned as `uses: owner/action@<40-char SHA> # vX.Y.Z`; Dependabot
+(`.github/dependabot.yml`) proposes updates to both together.
+
 ## Never commit a credential
 
 `.env` is in `.gitignore`. Keep it there.

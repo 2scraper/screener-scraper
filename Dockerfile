@@ -15,8 +15,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt requirements-playwright.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -r requirements-playwright.txt \
+# From the lock, hash-checked: the image carries exactly the versions CI
+# tested, and a tampered download fails the build instead of shipping.
+COPY requirements-playwright.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements-playwright.lock \
     # Playwright's own apt-get for Chromium's shared libraries — not pip
     # packages, so this has to be its own explicit step.
     && playwright install --with-deps chromium

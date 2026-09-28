@@ -9,6 +9,43 @@ notes with a warning saying so.
 
 ## [Unreleased]
 
+### Added
+
+- **`http_scraper.py`, a plain-HTTP engine.** It needs no browser and no key.
+  The table is in the served HTML, so a GET is enough.
+  - Measured on 2026-09-28, page 1: 1.2 s and 47 MB RSS, against 2.9 s and
+    150 MB for Playwright (plus Chromium's own processes). The 25 rows are
+    identical to Playwright's.
+  - How it fetches:
+    - one session, with separate connect and read timeouts;
+    - bounded retries of a connection error, a 429 or a 5xx, with a
+      jittered exponential backoff and `Retry-After` honoured (capped);
+    - a refusal is never retried from the same address;
+    - an honest User-Agent;
+    - `--proxy` / `--proxy-file`;
+    - sequential only.
+  - It is optional: Playwright stays the default.
+- **`listing_run.py`: the page loop the two browserless engines share.** The
+  Scraper API client now runs on it too, so the HTTP engine is not a fourth
+  copy of that loop. A transport is `fetch(args, url) -> (html, status,
+  final_url)` and does its own transient-fault retries. The Scraper API
+  client now reports the last page it fetched as `final_url`, not the start
+  URL.
+
+### Changed
+
+- **Every download CI and the image make is pinned.**
+  - Actions are pinned by commit SHA, with the release in a comment;
+    Dependabot proposes updates.
+  - CI, the canary and the Docker image install only the hashed
+    `requirements*.lock` files, with `--require-hashes`. The `.txt` files stay
+    as the loose spec.
+  - `audit.yml` runs `pip-audit` over every lock on each change and weekly.
+    The pyppeteer lock's five urllib3 1.x advisories (pyppeteer needs
+    `urllib3<2`) are ignored by ID and explained in the README.
+  - Workflows run with a read-only token.
+  - Ported from lg-scraper 0.2.1; the locks resolve to the same pins.
+
 ### Fixed
 
 - **A refused Fingerprint API crashed the run with a traceback and exit 1.**

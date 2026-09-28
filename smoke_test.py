@@ -48,6 +48,7 @@ from dataclasses import asdict
 import captcha_solver
 import cli_types
 import env_config
+import listing_run
 import output_writer
 import page_flow
 import product_parser
@@ -2506,6 +2507,101 @@ def check_concurrent_path_stops_like_the_sequential_one():
          engine._fetch_pages_concurrently, engine._between_pages) = saved
 
 
+# ---------------------------------------------------------------------------
+# Supply chain: every download CI and the image make is pinned
+# ---------------------------------------------------------------------------
+_LOCKS = {
+    # lock -> the requirement files it was compiled from (its header says so)
+    "requirements.lock": ["requirements.txt"],
+    "requirements-playwright.lock": ["requirements.txt", "requirements-playwright.txt"],
+    "requirements-puppeteer.lock": ["requirements.txt", "requirements-puppeteer.txt"],
+    "requirements-selenium.lock": ["requirements.txt", "requirements-selenium.txt"],
+    ".github/requirements-ci.lock": ["requirements.txt", ".github/requirements-ci.txt"],
+}
+
+
+def _version(text):
+    return tuple(int(n) for n in re.findall(r"\d+", text)[:4])
+
+
+def _lock_pins(path):
+    """{name: [(version, hash count)]} — a universal lock may pin one
+    package twice, under different python_version markers."""
+    pins, current = {}, None
+    for line in open(path, encoding="utf-8"):
+        m = re.match(r"([A-Za-z0-9_.-]+)==([^\s;\\]+)", line)
+        if m:
+            current = [_version(m.group(2)), 0]
+            pins.setdefault(m.group(1).lower().replace("_", "-"), []).append(current)
+        elif current is not None and "--hash=sha256:" in line:
+            current[1] += 1
+    return pins
+
+
+def check_supply_chain_is_pinned():
+    """A tag like `actions/checkout@v4` can be moved to another commit, and
+    `pip install -r requirements.txt` takes whatever PyPI serves that day.
+    Both are now pinned; these checks keep a later edit from quietly
+    unpinning either."""
+    print("\n[supply chain is pinned]")
+    workflows = sorted(os.path.join(REPO, ".github", "workflows", n)
+                       for n in os.listdir(os.path.join(REPO, ".github", "workflows"))
+                       if n.endswith((".yml", ".yaml")))
+    for path in workflows:
+        name = os.path.basename(path)
+        text = open(path, encoding="utf-8").read()
+        uses = re.findall(r"uses:\s*(\S+)(.*)", text)
+        loose = [u for u, rest in uses
+                 if not re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", u)
+                 or not re.search(r"#\s*v\d", rest)]
+        check(f"{name}: every action is pinned to a commit SHA with its release "
+              f"as a comment" + (f" (not: {loose})" if loose else ""), uses and not loose)
+        installs = [line.strip() for line in text.splitlines()
+                    if re.search(r"\bpip install\b", line) and not line.strip().startswith("#")]
+        unlocked = [i for i in installs
+                    if not re.search(r"--require-hashes -r [^ ]*(?:\$\{\{[^}]*\}\}[^ ]*)?\.lock\b", i)]
+        check(f"{name}: every pip install is from a hashed lock"
+              + (f" (not: {unlocked})" if unlocked else ""), not unlocked)
+        for lock in re.findall(r"-r (\S+\.lock)\b", text):
+            if "${{" not in lock:
+                check(f"{name}: {lock} exists", os.path.exists(os.path.join(REPO, lock)))
+
+    docker = open(os.path.join(REPO, "Dockerfile"), encoding="utf-8").read()
+    # This image runs the Playwright engine, so it installs that engine's lock.
+    check("the image installs from requirements-playwright.lock with --require-hashes",
+          "--require-hashes -r requirements-playwright.lock" in docker
+          and "COPY requirements-playwright.lock" in docker)
+
+    for lock, sources in _LOCKS.items():
+        path = os.path.join(REPO, lock)
+        if not check(f"{lock} exists", os.path.exists(path)):
+            continue
+        header = open(path, encoding="utf-8").read().split("\n", 3)[1]
+        eq(f"{lock} was compiled from exactly its requirement files",
+           [t for t in header.split() if t.endswith(".txt")], sources)
+        check(f"{lock} is universal from the oldest supported Python",
+              "--universal" in header and "--python-version 3.9" in header)
+        pins = _lock_pins(path)
+        unhashed = [n for n, vs in pins.items() if any(h == 0 for _, h in vs)]
+        check(f"{lock}: every pin carries a hash"
+              + (f" (not: {unhashed})" if unhashed else ""), pins and not unhashed)
+        for source in sources:
+            for line in open(os.path.join(REPO, source), encoding="utf-8"):
+                req = line.split("#")[0].strip()
+                if not req:
+                    continue
+                m = re.fullmatch(r"([A-Za-z0-9_.-]+)\s*>=\s*([\w.]+)", req)
+                if not check(f"{source}: {req!r} is a plain '>=' floor the lock "
+                             f"check can read", m):
+                    continue
+                name = m.group(1).lower().replace("_", "-")
+                floor = _version(m.group(2))
+                versions = [v for v, _ in pins.get(name, [])]
+                check(f"{lock} pins {name} at or above {m.group(2)}"
+                      + (f" (has {versions})" if versions else " (missing)"),
+                      versions and all(v >= floor for v in versions))
+
+
 # The shape of 2Captcha's own reCAPTCHA v2 demo page (2captcha.com/demo/
 # recaptcha-v2, 2026-09-28), reduced to what a detector reads: an explicit
 # loader and a widget element. The sitekey is a made-up one of the right shape.
@@ -2638,6 +2734,197 @@ def check_fingerprint_refusal_is_an_api_error():
           "printed", fake_key not in text)
 
 
+class _FakeResp:
+    def __init__(self, text, status=200, url="", headers=None):
+        self.text, self.status_code, self.url = text, status, url
+        self.headers = headers or {}
+        self.content = text.encode("utf-8")
+
+
+class _FakeSession:
+    """requests.Session, answering from a script: each item is a response,
+    an exception to raise, or a callable(url) -> response."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []
+        self.headers = {}
+        self.proxies = {}
+
+    def get(self, url, timeout=None):
+        self.calls.append(url)
+        item = self.script.pop(0) if self.script else _FakeResp("", 599, url)
+        if callable(item) and not isinstance(item, _FakeResp):
+            item = item(url)
+        if isinstance(item, Exception):
+            raise item
+        if not item.url:
+            item.url = url
+        return item
+
+
+def check_http_engine():
+    """The plain-HTTP engine through a fake session: the same real-capture
+    scenarios every other engine is held to, its transport's retry rules,
+    and parity with the Scraper API client on the same bytes."""
+    print("\n[http engine]")
+    import requests
+    import http_scraper
+    import scraper_api_client as sac
+    base = "https://www.screener.in/market/IN08/IN0801/IN080101/"
+    scenarios = (
+        ("two pages of a 7-page sector", base, 2,
+         {1: "market_p1", 2: "market_p2"}, 0, "complete", "completed"),
+        ("a run started on the LAST page, asking for 50", base + "?page=7", 50,
+         {7: "market_p7_last"}, 0, "complete", "listing_exhausted"),
+        ("a run started past the end", base + "?page=8", 1,
+         {8: "market_p8_out_of_range"}, EXIT_FETCH_FAILED, None, None),
+        ("the registration wall", "https://www.screener.in/screens/59/magic-formula/", 1,
+         {1: "cdp_register_wall"}, EXIT_BLOCKED, None, None),
+        ("a screen that does not exist", "https://www.screener.in/screens/999999999/nope/", 1,
+         {1: "not_found"}, EXIT_FETCH_FAILED, None, None),
+    )
+    saved_check = http_scraper.check_exit_or_raise
+    http_scraper.check_exit_or_raise = lambda *a, **kw: None   # no network
+    try:
+        for label, url, pages, served, want_rc, want_status, want_stop in scenarios:
+            fetched = []
+
+            def answer(page_url_, _served=served, _fetched=fetched):
+                n = product_parser.requested_page_number(page_url_)
+                _fetched.append(n)
+                name = _served.get(n)
+                if name is None:
+                    _fetched.append(f"unplanned:{n}")
+                    name = next(iter(_served.values()))
+                return _FakeResp(fx(name)[0], 404 if name == "not_found" else 200)
+
+            session = _FakeSession([answer] * 60)
+            with tempfile.TemporaryDirectory() as tmp:
+                args = http_scraper.parse_args(["--url", url, "--pages", str(pages),
+                                                "--delay", "0", "--format", "json",
+                                                "--out", os.path.join(tmp, "run")])
+                with redirect_stdout(io.StringIO()):
+                    rc = http_scraper.scrape(args, session=session, sleep=lambda s: None)
+                eq(f"http: {label} exits {want_rc}", rc, want_rc)
+                meta_path = os.path.join(tmp, "run.meta.json")
+                if want_status:
+                    meta = json.load(open(meta_path, encoding="utf-8"))
+                    eq(f"http: {label} is {want_status}/{want_stop}",
+                       (meta["status"], meta["stop_reason"]), (want_status, want_stop))
+                    eq(f"http: {label} records its engine", meta["engine"], "http")
+                else:
+                    check(f"http: {label} writes no sidecar", not os.path.exists(meta_path))
+                eq(f"http: {label} fetches exactly the pages it should",
+                   fetched, sorted(served))
+
+        # Parity: the same two pages through the Scraper API client give the
+        # same rows, field for field, apart from the parse timestamp.
+        real_fetch = sac.fetch_html
+        rows = {}
+        try:
+            sac.fetch_html = lambda a, u: (
+                fx({1: "market_p1", 2: "market_p2"}[
+                    product_parser.requested_page_number(u)])[0], 200)
+            with tempfile.TemporaryDirectory() as tmp:
+                common = ["--url", base, "--pages", "2", "--delay", "0",
+                          "--retry-delay", "0", "--format", "json"]
+                argv = sys.argv
+                sys.argv = ["scraper_api_client.py", *common, "--key", "k" * 32,
+                            "--out", os.path.join(tmp, "sac")]
+                try:
+                    sargs = sac.parse_args()
+                finally:
+                    sys.argv = argv
+                hargs = http_scraper.parse_args([*common, "--out", os.path.join(tmp, "http")])
+                with redirect_stdout(io.StringIO()):
+                    sac.scrape(sargs)
+                    http_scraper.scrape(hargs, session=_FakeSession([
+                        lambda u: _FakeResp(fx({1: "market_p1", 2: "market_p2"}[
+                            product_parser.requested_page_number(u)])[0])] * 2),
+                        sleep=lambda s: None)
+                for name in ("sac", "http"):
+                    rows[name] = [{k: v for k, v in r.items() if k != "scraped_at"}
+                                  for r in json.load(open(os.path.join(tmp, f"{name}.json"),
+                                                          encoding="utf-8"))]
+        finally:
+            sac.fetch_html = real_fetch
+        check(f"http and the Scraper API client write identical rows from the same "
+              f"bytes ({len(rows.get('http', []))} rows)",
+              rows.get("http") and rows.get("http") == rows.get("sac"))
+
+        # The transport's own retry rules.
+        page1 = fx("market_p1")[0]
+
+        def transport(script, retries=3, retry_delay=2.0):
+            args = http_scraper.parse_args(["--url", base, "--retries", str(retries),
+                                            "--retry-delay", str(retry_delay)])
+            slept = []
+            t = http_scraper.HttpTransport(args, None, session=_FakeSession(script),
+                                           sleep=slept.append)
+            return t, args, slept
+
+        t, args, slept = transport([_FakeResp("", 429, headers={"Retry-After": "7"}),
+                                    _FakeResp(page1)])
+        html, status, _ = t(args, base)
+        check("a 429 is retried, and Retry-After is what it waits",
+              status == 200 and slept == [7.0])
+        t, args, slept = transport([_FakeResp("", 503, headers={"Retry-After": "3600"}),
+                                    _FakeResp(page1)])
+        t(args, base)
+        eq("a Retry-After of an hour is capped, not waited out", slept,
+           [float(http_scraper.MAX_RETRY_AFTER)])
+        t, args, slept = transport([requests.ConnectionError("reset"), _FakeResp(page1)])
+        _, status, _ = t(args, base)
+        check("a connection error is retried with a jittered backoff "
+              f"({slept})", status == 200 and len(slept) == 1 and 1.0 <= slept[0] <= 3.0)
+        t, args, slept = transport([_FakeResp("", 503)] * 5)
+        _, status, _ = t(args, base)
+        check("a 503 that outlasts --retries is handed on, after retries-1 pauses",
+              status == 503 and len(slept) == 2 and len(t.session.calls) == 3)
+        t, args, slept = transport([_FakeResp(fx("cdp_register_wall")[0], 403),
+                                    _FakeResp(page1)])
+        _, status, _ = t(args, base)
+        check("a 403 is NOT retried from the same address",
+              status == 403 and not slept and len(t.session.calls) == 1)
+        t, args, slept = transport([requests.ConnectionError("down")] * 3)
+        try:
+            t(args, base)
+            check("a transport that never connects raises FetchFailed", False)
+        except listing_run.FetchFailed:
+            check("a transport that never connects raises FetchFailed", True)
+
+        # Identity, and a proxy's credentials.
+        ua = t.session.headers.get("User-Agent", "")
+        check("the User-Agent names this project and does not pose as a browser",
+              "screener-scraper" in ua and "Mozilla" not in ua)
+        secret = "sec" + "ret"
+        proxy = "http://user:" + secret + "@10.0.0.1:3128"
+        args = http_scraper.parse_args(["--url", base, "--proxy", proxy])
+        pool = proxy_pool.from_args(args)
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        http_scraper.logger.addHandler(handler)
+        level = http_scraper.logger.level
+        http_scraper.logger.setLevel(logging.INFO)
+        try:
+            t = http_scraper.HttpTransport(args, pool, session=_FakeSession(
+                [requests.ConnectionError(f"Cannot connect to proxy {proxy}")] * 3),
+                sleep=lambda s: None)
+            try:
+                t(args, base)
+            except listing_run.FetchFailed as e:
+                buf.write(str(e))
+        finally:
+            http_scraper.logger.removeHandler(handler)
+            http_scraper.logger.setLevel(level)
+        eq("the session goes through the proxy", t.session.proxies.get("https"), proxy)
+        check("and its password reaches neither a log line nor the error",
+              secret + "@" not in buf.getvalue() and "10.0.0.1:3128" in buf.getvalue())
+    finally:
+        http_scraper.check_exit_or_raise = saved_check
+
+
 LONG_SLEEPS = []
 
 
@@ -2697,7 +2984,9 @@ def main() -> int:
                   check_concurrent_path_stops_like_the_sequential_one,
                   check_captcha_javascript_actually_runs,
                   check_recaptcha_version_from_markup,
-                  check_fingerprint_refusal_is_an_api_error):
+                  check_fingerprint_refusal_is_an_api_error,
+                  check_supply_chain_is_pinned,
+                  check_http_engine):
         group()
     # The offline suite must not really wait out a retry delay: 22s of it
     # was two blocked scenarios sleeping the default --retry-delay.
