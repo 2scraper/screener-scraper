@@ -51,6 +51,16 @@ Fixes from a second pass over a third-party audit of 0.1.0.
 
 ### Fixed
 
+- **Runtime captcha detection never ran, in any engine.** The discovery
+  script began ` => {` with no parameter list, a SyntaxError swallowed at
+  debug level; Selenium additionally returned the function instead of calling
+  it. Both fixed, the failure is now a warning, and the suite parses every
+  shipped script with `node --check` and runs discovery in a real page.
+- **An explicitly rendered reCAPTCHA v2 widget was classified as v3** by the
+  HTML detector, and a v2 task sent as v3 is `ERROR_CAPTCHA_UNSOLVABLE`.
+  Found by the first live solve (2026-09-28, 2Captcha's reCAPTCHA v2 demo
+  page); after the fix both the v2 and v1 APIs solved it and the page's own
+  server-side check answered `"success": true`.
 - The offline suite really slept 20 of its 22 seconds (two blocked scenarios
   waiting out the default `--retry-delay`). It now runs in about a second,
   and fails if any check sleeps a second or more.
