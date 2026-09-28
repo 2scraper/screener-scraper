@@ -7,7 +7,20 @@ toolkit can: a patch release means fixes, not that every flag and default is
 frozen, and a patch that changes behaviour for an existing user leads its
 notes with a warning saying so.
 
-## [Unreleased]
+## [0.2.0] — 2026-09-28
+
+A plain-HTTP engine, a pinned supply chain, and follow-ups to 0.1.1.
+Playwright stays the default engine. Nothing is removed or renamed.
+
+> **Behaviour changes for an existing user:**
+>
+> - `--fingerprint` against a Fingerprint API that refuses the key now
+>   exits **5** (remote API error) with the reason. It used to crash with
+>   a traceback and exit 1.
+> - The Scraper API client's `.meta.json` now reports the last page it
+>   fetched as `final_url`, not the start URL.
+> - CI, the canary and the Docker image install from hashed lock files. A
+>   plain `pip install -r requirements.txt` is unchanged.
 
 ### Added
 
@@ -34,6 +47,9 @@ notes with a warning saying so.
 
 ### Changed
 
+- GitHub Actions moved to checkout v7.0.1, setup-python v7.0.0 and
+  upload-artifact v7.0.1 (Dependabot, #5). The canary was run on them and
+  uploaded its artefact.
 - **Every download CI and the image make is pinned.**
   - Actions are pinned by commit SHA, with the release in a comment;
     Dependabot proposes updates.
