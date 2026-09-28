@@ -7,6 +7,16 @@ toolkit can: a patch release means fixes, not that every flag and default is
 frozen, and a patch that changes behaviour for an existing user leads its
 notes with a warning saying so.
 
+## [Unreleased]
+
+### Changed
+
+- README and TROUBLESHOOTING state what the 2026-09-28 live runs measured:
+  the Scraping Browser API, the Scraper API and a 2Captcha proxy each served
+  page 1 in full; captcha solving was verified on 2Captcha's reCAPTCHA v2
+  demo page; the Fingerprint API answers 403 without its own subscription,
+  and such a run stops with exit 5.
+
 ## [0.2.0] — 2026-09-28
 
 A plain-HTTP engine, a pinned supply chain, and follow-ups to 0.1.1.
