@@ -48,6 +48,7 @@ from dataclasses import asdict
 import captcha_solver
 import cli_types
 import env_config
+import listing_run
 import output_writer
 import page_flow
 import product_parser
@@ -2733,6 +2734,197 @@ def check_fingerprint_refusal_is_an_api_error():
           "printed", fake_key not in text)
 
 
+class _FakeResp:
+    def __init__(self, text, status=200, url="", headers=None):
+        self.text, self.status_code, self.url = text, status, url
+        self.headers = headers or {}
+        self.content = text.encode("utf-8")
+
+
+class _FakeSession:
+    """requests.Session, answering from a script: each item is a response,
+    an exception to raise, or a callable(url) -> response."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []
+        self.headers = {}
+        self.proxies = {}
+
+    def get(self, url, timeout=None):
+        self.calls.append(url)
+        item = self.script.pop(0) if self.script else _FakeResp("", 599, url)
+        if callable(item) and not isinstance(item, _FakeResp):
+            item = item(url)
+        if isinstance(item, Exception):
+            raise item
+        if not item.url:
+            item.url = url
+        return item
+
+
+def check_http_engine():
+    """The plain-HTTP engine through a fake session: the same real-capture
+    scenarios every other engine is held to, its transport's retry rules,
+    and parity with the Scraper API client on the same bytes."""
+    print("\n[http engine]")
+    import requests
+    import http_scraper
+    import scraper_api_client as sac
+    base = "https://www.screener.in/market/IN08/IN0801/IN080101/"
+    scenarios = (
+        ("two pages of a 7-page sector", base, 2,
+         {1: "market_p1", 2: "market_p2"}, 0, "complete", "completed"),
+        ("a run started on the LAST page, asking for 50", base + "?page=7", 50,
+         {7: "market_p7_last"}, 0, "complete", "listing_exhausted"),
+        ("a run started past the end", base + "?page=8", 1,
+         {8: "market_p8_out_of_range"}, EXIT_FETCH_FAILED, None, None),
+        ("the registration wall", "https://www.screener.in/screens/59/magic-formula/", 1,
+         {1: "cdp_register_wall"}, EXIT_BLOCKED, None, None),
+        ("a screen that does not exist", "https://www.screener.in/screens/999999999/nope/", 1,
+         {1: "not_found"}, EXIT_FETCH_FAILED, None, None),
+    )
+    saved_check = http_scraper.check_exit_or_raise
+    http_scraper.check_exit_or_raise = lambda *a, **kw: None   # no network
+    try:
+        for label, url, pages, served, want_rc, want_status, want_stop in scenarios:
+            fetched = []
+
+            def answer(page_url_, _served=served, _fetched=fetched):
+                n = product_parser.requested_page_number(page_url_)
+                _fetched.append(n)
+                name = _served.get(n)
+                if name is None:
+                    _fetched.append(f"unplanned:{n}")
+                    name = next(iter(_served.values()))
+                return _FakeResp(fx(name)[0], 404 if name == "not_found" else 200)
+
+            session = _FakeSession([answer] * 60)
+            with tempfile.TemporaryDirectory() as tmp:
+                args = http_scraper.parse_args(["--url", url, "--pages", str(pages),
+                                                "--delay", "0", "--format", "json",
+                                                "--out", os.path.join(tmp, "run")])
+                with redirect_stdout(io.StringIO()):
+                    rc = http_scraper.scrape(args, session=session, sleep=lambda s: None)
+                eq(f"http: {label} exits {want_rc}", rc, want_rc)
+                meta_path = os.path.join(tmp, "run.meta.json")
+                if want_status:
+                    meta = json.load(open(meta_path, encoding="utf-8"))
+                    eq(f"http: {label} is {want_status}/{want_stop}",
+                       (meta["status"], meta["stop_reason"]), (want_status, want_stop))
+                    eq(f"http: {label} records its engine", meta["engine"], "http")
+                else:
+                    check(f"http: {label} writes no sidecar", not os.path.exists(meta_path))
+                eq(f"http: {label} fetches exactly the pages it should",
+                   fetched, sorted(served))
+
+        # Parity: the same two pages through the Scraper API client give the
+        # same rows, field for field, apart from the parse timestamp.
+        real_fetch = sac.fetch_html
+        rows = {}
+        try:
+            sac.fetch_html = lambda a, u: (
+                fx({1: "market_p1", 2: "market_p2"}[
+                    product_parser.requested_page_number(u)])[0], 200)
+            with tempfile.TemporaryDirectory() as tmp:
+                common = ["--url", base, "--pages", "2", "--delay", "0",
+                          "--retry-delay", "0", "--format", "json"]
+                argv = sys.argv
+                sys.argv = ["scraper_api_client.py", *common, "--key", "k" * 32,
+                            "--out", os.path.join(tmp, "sac")]
+                try:
+                    sargs = sac.parse_args()
+                finally:
+                    sys.argv = argv
+                hargs = http_scraper.parse_args([*common, "--out", os.path.join(tmp, "http")])
+                with redirect_stdout(io.StringIO()):
+                    sac.scrape(sargs)
+                    http_scraper.scrape(hargs, session=_FakeSession([
+                        lambda u: _FakeResp(fx({1: "market_p1", 2: "market_p2"}[
+                            product_parser.requested_page_number(u)])[0])] * 2),
+                        sleep=lambda s: None)
+                for name in ("sac", "http"):
+                    rows[name] = [{k: v for k, v in r.items() if k != "scraped_at"}
+                                  for r in json.load(open(os.path.join(tmp, f"{name}.json"),
+                                                          encoding="utf-8"))]
+        finally:
+            sac.fetch_html = real_fetch
+        check(f"http and the Scraper API client write identical rows from the same "
+              f"bytes ({len(rows.get('http', []))} rows)",
+              rows.get("http") and rows.get("http") == rows.get("sac"))
+
+        # The transport's own retry rules.
+        page1 = fx("market_p1")[0]
+
+        def transport(script, retries=3, retry_delay=2.0):
+            args = http_scraper.parse_args(["--url", base, "--retries", str(retries),
+                                            "--retry-delay", str(retry_delay)])
+            slept = []
+            t = http_scraper.HttpTransport(args, None, session=_FakeSession(script),
+                                           sleep=slept.append)
+            return t, args, slept
+
+        t, args, slept = transport([_FakeResp("", 429, headers={"Retry-After": "7"}),
+                                    _FakeResp(page1)])
+        html, status, _ = t(args, base)
+        check("a 429 is retried, and Retry-After is what it waits",
+              status == 200 and slept == [7.0])
+        t, args, slept = transport([_FakeResp("", 503, headers={"Retry-After": "3600"}),
+                                    _FakeResp(page1)])
+        t(args, base)
+        eq("a Retry-After of an hour is capped, not waited out", slept,
+           [float(http_scraper.MAX_RETRY_AFTER)])
+        t, args, slept = transport([requests.ConnectionError("reset"), _FakeResp(page1)])
+        _, status, _ = t(args, base)
+        check("a connection error is retried with a jittered backoff "
+              f"({slept})", status == 200 and len(slept) == 1 and 1.0 <= slept[0] <= 3.0)
+        t, args, slept = transport([_FakeResp("", 503)] * 5)
+        _, status, _ = t(args, base)
+        check("a 503 that outlasts --retries is handed on, after retries-1 pauses",
+              status == 503 and len(slept) == 2 and len(t.session.calls) == 3)
+        t, args, slept = transport([_FakeResp(fx("cdp_register_wall")[0], 403),
+                                    _FakeResp(page1)])
+        _, status, _ = t(args, base)
+        check("a 403 is NOT retried from the same address",
+              status == 403 and not slept and len(t.session.calls) == 1)
+        t, args, slept = transport([requests.ConnectionError("down")] * 3)
+        try:
+            t(args, base)
+            check("a transport that never connects raises FetchFailed", False)
+        except listing_run.FetchFailed:
+            check("a transport that never connects raises FetchFailed", True)
+
+        # Identity, and a proxy's credentials.
+        ua = t.session.headers.get("User-Agent", "")
+        check("the User-Agent names this project and does not pose as a browser",
+              "screener-scraper" in ua and "Mozilla" not in ua)
+        secret = "sec" + "ret"
+        proxy = "http://user:" + secret + "@10.0.0.1:3128"
+        args = http_scraper.parse_args(["--url", base, "--proxy", proxy])
+        pool = proxy_pool.from_args(args)
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        http_scraper.logger.addHandler(handler)
+        level = http_scraper.logger.level
+        http_scraper.logger.setLevel(logging.INFO)
+        try:
+            t = http_scraper.HttpTransport(args, pool, session=_FakeSession(
+                [requests.ConnectionError(f"Cannot connect to proxy {proxy}")] * 3),
+                sleep=lambda s: None)
+            try:
+                t(args, base)
+            except listing_run.FetchFailed as e:
+                buf.write(str(e))
+        finally:
+            http_scraper.logger.removeHandler(handler)
+            http_scraper.logger.setLevel(level)
+        eq("the session goes through the proxy", t.session.proxies.get("https"), proxy)
+        check("and its password reaches neither a log line nor the error",
+              secret + "@" not in buf.getvalue() and "10.0.0.1:3128" in buf.getvalue())
+    finally:
+        http_scraper.check_exit_or_raise = saved_check
+
+
 LONG_SLEEPS = []
 
 
@@ -2793,7 +2985,8 @@ def main() -> int:
                   check_captcha_javascript_actually_runs,
                   check_recaptcha_version_from_markup,
                   check_fingerprint_refusal_is_an_api_error,
-                  check_supply_chain_is_pinned):
+                  check_supply_chain_is_pinned,
+                  check_http_engine):
         group()
     # The offline suite must not really wait out a retry delay: 22s of it
     # was two blocked scenarios sleeping the default --retry-delay.
