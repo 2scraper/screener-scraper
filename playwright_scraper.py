@@ -65,7 +65,9 @@ import env_config
 import page_flow
 from captcha_solver import (INJECT_TOKEN_FN, detect_in_html, detect_in_page,
                             reconcile_detections, solve)
-from output_writer import failure_stop_reason, finish_run, merge_pages
+from fingerprint_client import FingerprintError
+from output_writer import (EXIT_API_ERROR, failure_stop_reason, finish_run,
+                           merge_pages)
 from product_parser import SELECTORS, parse_products
 from proxy_pool import (ROTATE_MODES, ProxyError, ProxyPool,
                         check_exit_or_raise,
@@ -1047,6 +1049,14 @@ if __name__ == "__main__":
         # surface as a connection failure on page 1 with nothing naming it.
         logger.error("%s", e)
         sys.exit(2)
+    except FingerprintError as e:
+        # The run asked for a fingerprint and cannot have one — measured
+        # 2026-09-28: a key with a working solver balance gets 403 here when
+        # the separate Fingerprint subscription is off. Exit 5 like any other
+        # remote API error, with the reason and no traceback.
+        logger.error("%s No page was fetched. Drop --fingerprint to run "
+                     "without one.", e)
+        sys.exit(EXIT_API_ERROR)
     except KeyboardInterrupt:
         sys.exit(1)
     except Exception:  # noqa: BLE001 — a traceback is a log, and it is printed

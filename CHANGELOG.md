@@ -7,6 +7,18 @@ toolkit can: a patch release means fixes, not that every flag and default is
 frozen, and a patch that changes behaviour for an existing user leads its
 notes with a warning saying so.
 
+## [Unreleased]
+
+### Fixed
+
+- **A refused Fingerprint API crashed the run with a traceback and exit 1.**
+  It now exits 5, the remote-API code, with the reason and no traceback.
+  The case is real: on 2026-09-28 a key with a working captcha-solving
+  balance got 403 from `/fingerprint/random`, because fingerprints are a
+  separate subscription.
+- The real-page captcha check added in 0.1.1 reported a script error as a
+  skip ("no browser"). An error from the script itself is now a failure.
+
 ## [0.1.1] — 2026-09-28
 
 Fixes from a second pass over a third-party audit of 0.1.0.

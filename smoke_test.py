@@ -2556,19 +2556,35 @@ def check_captcha_javascript_actually_runs():
     except ImportError:
         skip("the discovery script runs in a real page", "playwright not installed")
         return
+    # Only a browser that will not START is a skip. An error from the
+    # script itself is a FAILURE: the first version of this check caught
+    # both, and on the unfixed code reported the SyntaxError it exists to
+    # find as "skipped, no browser".
+    info, error = None, None
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch()
+            try:
+                browser = pw.chromium.launch()
+            except Exception as e:  # noqa: BLE001 — no browser binary here
+                skip("the discovery script runs in a real page",
+                     f"no browser: {type(e).__name__}")
+                return
             try:
                 page = browser.new_page()
                 # Offline: every request is refused, so only the markup counts.
                 page.route("**/*", lambda route: route.abort())
                 page.set_content(_V2_EXPLICIT)
                 info = page.evaluate(captcha_solver.CAPTCHA_DISCOVERY_JS)
+            except Exception as e:  # noqa: BLE001 — reported as a failure below
+                error = f"{type(e).__name__}: {str(e).splitlines()[0][:120]}"
             finally:
                 browser.close()
-    except Exception as e:  # noqa: BLE001 — no browser binary in this environment
-        skip("the discovery script runs in a real page", f"no browser: {type(e).__name__}")
+    except Exception as e:  # noqa: BLE001 — the driver itself is unavailable
+        skip("the discovery script runs in a real page",
+             f"no playwright driver: {type(e).__name__}")
+        return
+    if not check("the discovery script runs in a real page without an error"
+                 + (f" ({error})" if error else ""), error is None):
         return
     runtime = captcha_solver.challenge_from_discovery(info)
     check("run in a page, it finds the widget", bool(info and info.get("found")))
@@ -2588,6 +2604,38 @@ def check_recaptcha_version_from_markup():
     found = captcha_solver.detect_in_html(v3, "https://example.test/")
     eq("a loader rendering the sitekey itself is v3", found and found.kind,
        "recaptcha_v3")
+
+
+def check_fingerprint_refusal_is_an_api_error():
+    """A refused or unreachable Fingerprint API is exit 5 with a reason, not
+    a traceback and exit 1. Offline: requests go to a proxy that does not
+    exist, and every variable a developer's own .env could set is overridden
+    with an empty one (which the loader treats as unset)."""
+    print("\n[fingerprint refusal]")
+    if ENGINES.get("playwright_scraper") is None:
+        skip("fingerprint refusal", "playwright not installed")
+        return
+    import subprocess
+    example = open(os.path.join(REPO, ".env.example"), encoding="utf-8").read()
+    url = re.search(r"^[A-Z]+_URL=(https?://\S+)", example, re.M).group(1)
+    fake_key = "f" + "a" * 31
+    env = dict(os.environ, HTTPS_PROXY="http://127.0.0.1:9",
+               HTTP_PROXY="http://127.0.0.1:9",
+               **{name: "" for name in env_config.ENV_KEYS})
+    with tempfile.TemporaryDirectory() as tmp:
+        run = subprocess.run(
+            [sys.executable, os.path.join(REPO, "playwright_scraper.py"),
+             "--url", url, "--pages", "1",
+             "--fingerprint", "--twocaptcha-key", fake_key,
+             "--out", os.path.join(tmp, "run")],
+            cwd=tmp, env=env, capture_output=True, text=True, timeout=120)
+    text = run.stdout + run.stderr
+    # 5 is the family contract's remote-API code, whichever module names it.
+    eq("a failed fingerprint fetch exits 5, the remote-API code", run.returncode, 5)
+    check("with the reason and no traceback", "Traceback" not in text
+          and "Fingerprint API" in text)
+    check("and the key, which rides in this endpoint's query string, is not "
+          "printed", fake_key not in text)
 
 
 LONG_SLEEPS = []
@@ -2648,7 +2696,8 @@ def main() -> int:
                   check_diff_refuses_a_mixed_artifact_set,
                   check_concurrent_path_stops_like_the_sequential_one,
                   check_captcha_javascript_actually_runs,
-                  check_recaptcha_version_from_markup):
+                  check_recaptcha_version_from_markup,
+                  check_fingerprint_refusal_is_an_api_error):
         group()
     # The offline suite must not really wait out a retry delay: 22s of it
     # was two blocked scenarios sleeping the default --retry-delay.
