@@ -120,7 +120,16 @@ a listing the site reports as empty write an empty file.
 | `playwright_scraper.py` | **Playwright** — primary | 3 pages / 75 rows; 7 of 7 pages / 164 rows; a 3-page screen under `--concurrency 2` (pages 1–2 are always sequential, so one page went through the worker pool), 64 of 64 |
 | `puppeteer_scraper.py` | pyppeteer | 3 pages / 75 rows — same companies and quarterly figures as Playwright |
 | `selenium_scraper.py` | Selenium + Chrome | 3 pages / 75 rows — same companies and quarterly figures as Playwright |
-| `scraper_api_client.py` | 2Captcha Scraper API, no local browser | **not run live in this version** — no key was available; exercised offline against real captures |
+| `scraper_api_client.py` | 2Captcha Scraper API, no local browser | 2026-09-28: page 1, 25 rows, identical to Playwright's; 6.1 s, 0.0005 per task |
+| `http_scraper.py` | **plain HTTP**, no browser, no key — optional | 2026-09-28: page 1, 25 rows identical to Playwright's; 1.2 s and 47 MB RSS against Playwright's 2.9 s and 150 MB (plus Chromium's own processes); 4.3 s through a 2Captcha proxy |
+
+**The plain-HTTP engine is the lightest way to run this scraper**, because
+the table is in the served HTML. It needs only `requirements.txt` (or
+`requirements.lock`), sends an honest User-Agent naming this project,
+retries a connection error, a 429 or a 5xx with backoff, honours
+`Retry-After`, and never retries a refusal from the same address. It has no
+`--concurrency` and no captcha solving. It is optional for now: the quick
+start, the Docker image and the canary still use Playwright.
 
 Install **one** engine per virtualenv: playwright and pyppeteer pin
 incompatible `pyee` versions, and pyppeteer and selenium collide on `urllib3`.

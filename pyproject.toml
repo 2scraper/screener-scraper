@@ -44,6 +44,8 @@ py-modules = [
     "diff_runs",
     "env_config",
     "fingerprint_client",
+    "http_scraper",
+    "listing_run",
     "make_fixtures",
     "output_writer",
     "page_flow",

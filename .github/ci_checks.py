@@ -34,7 +34,8 @@ REPO = Path(__file__).resolve().parent.parent
 ENGINE_LIBS = ("playwright", "pyppeteer", "selenium", "webdriver_manager")
 
 CLIS = ["playwright_scraper.py", "puppeteer_scraper.py", "selenium_scraper.py",
-        "scraper_api_client.py", "fingerprint_client.py", "env_config.py"]
+        "scraper_api_client.py", "http_scraper.py", "fingerprint_client.py",
+        "env_config.py"]
 
 SAMPLE_FILES = ("sample_output.json", "sample_output.csv")
 
