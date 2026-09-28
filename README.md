@@ -140,6 +140,26 @@ Known engine limits, stated rather than left to be discovered:
 - `--concurrency` and `--fingerprint` are implemented in the Playwright engine;
   the other two accept the flags for parity and say that they ignore them.
 
+**For the exact versions CI tested**, install the matching lock instead —
+every version pinned and every download hash-checked, for Python 3.9 and up:
+
+```bash
+pip install --require-hashes -r requirements-playwright.lock   # core + the primary engine
+pip install --require-hashes -r requirements.lock              # core only (Scraper API client)
+```
+
+The `.txt` files stay as the loose, `>=` specification; the `.lock` files are
+what CI, the canary and the Docker image install. A weekly `pip-audit` run
+checks every lock against the advisory databases.
+
+**The pyppeteer engine carries a known-vulnerable urllib3.** pyppeteer
+requires `urllib3<2`, and five published urllib3 advisories are fixed only in
+2.x — among them one where a cross-origin redirect can forward
+`Proxy-Authorization` to the new host (GHSA-qccp-gfcp-xxvc). In that engine's
+virtualenv `requests` uses the same urllib3, so the proxy preflight and the
+captcha API calls do too. The audit ignores exactly those five, by ID; prefer
+Playwright if you run with proxy credentials.
+
 ## Usage
 
 The first three examples request `?page=` URLs, which robots.txt disallows —

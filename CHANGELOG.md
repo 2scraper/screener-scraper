@@ -9,6 +9,20 @@ notes with a warning saying so.
 
 ## [Unreleased]
 
+### Changed
+
+- **Every download CI and the image make is pinned.**
+  - Actions are pinned by commit SHA, with the release in a comment;
+    Dependabot proposes updates.
+  - CI, the canary and the Docker image install only the hashed
+    `requirements*.lock` files, with `--require-hashes`. The `.txt` files stay
+    as the loose spec.
+  - `audit.yml` runs `pip-audit` over every lock on each change and weekly.
+    The pyppeteer lock's five urllib3 1.x advisories (pyppeteer needs
+    `urllib3<2`) are ignored by ID and explained in the README.
+  - Workflows run with a read-only token.
+  - Ported from lg-scraper 0.2.1; the locks resolve to the same pins.
+
 ### Fixed
 
 - **A refused Fingerprint API crashed the run with a traceback and exit 1.**
