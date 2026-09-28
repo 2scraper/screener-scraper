@@ -120,8 +120,12 @@ class PagePolicy:
 
 
 # Consulted by every engine — a constant nothing reads is the same defect as
-# dead code, so the engines take their retry budget, their rotation decision
-# and their solve decision from HERE and nowhere else.
+# dead code, so the engines take their retry, rotation and solve decisions
+# from HERE and nowhere else. `retry` says a refetch could change the answer;
+# the browser engines act on its two specific forms (`wait_first` for a page
+# still painting, `rotate_exit` for a refusal), and the Scraper API client,
+# whose only move is a new task, reads `retry` itself. smoke_test.py asserts
+# every field has a reader.
 STATE_POLICY = {
     CONTENT:   PagePolicy(retry=False, wait_first=False, rotate_exit=False,
                           may_solve=False, blocked=False, complete=False,

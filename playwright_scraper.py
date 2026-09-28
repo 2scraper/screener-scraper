@@ -70,9 +70,11 @@ from product_parser import SELECTORS, parse_products
 from proxy_pool import (ROTATE_MODES, ProxyError, ProxyPool,
                         check_exit_or_raise,
                         from_args as proxy_pool_from_args, mask,
-                        redact_secret_patterns, to_playwright)
+                        install_log_redaction, redact_secret_patterns,
+                        to_playwright)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+install_log_redaction()
 logger = logging.getLogger("playwright_scraper")
 
 # --- the whole of this engine's site knowledge -----------------------------
@@ -806,12 +808,39 @@ def scrape(args) -> int:
                         more, unattempted, ran_out, empty_at = (
                             _fetch_pages_concurrently(args, pool, specs,
                                                       concurrency))
+                        more = sorted(more, key=lambda o: o.page_num)
+                        # The sequential path's data-based stop, applied in
+                        # PAGE order after the fact: the first page that adds
+                        # no row not already seen ends the listing there, and
+                        # pages after it are dropped exactly as the
+                        # sequential loop would never have fetched them.
+                        seen = {p.sku for o in outcomes for p in o.products if p.sku}
+                        looped_at = None
+                        for i, o in enumerate(more):
+                            if not o.ok or o.complete_here or not o.products:
+                                break
+                            if not any(p.sku is None or p.sku not in seen
+                                       for p in o.products):
+                                looped_at = i
+                                break
+                            seen.update(p.sku for p in o.products if p.sku)
+                        if looped_at is not None:
+                            logger.info("Page %d added nothing not already "
+                                        "seen — treating that as the end of "
+                                        "the listing.", more[looped_at].page_num)
+                            more = more[:looped_at + 1]
                         outcomes.extend(more)
                         failed = [o for o in more if not o.ok]
-                        if failed:
-                            worst = min(failed, key=lambda o: o.page_num)
+                        if looped_at is not None and not failed:
+                            stop_reason = "no_new_listings"
+                        elif failed:
+                            worst = failed[0]
                             stop_reason = failure_stop_reason(worst)
-                            blocked = any(o.state and o.state.policy.blocked for o in more)
+                            # The page that stopped the run decides, as on the
+                            # sequential path — not "any page was blocked",
+                            # which called a run blocked because of a page
+                            # fetched after the one that actually failed.
+                            blocked = bool(worst.state and worst.state.policy.blocked)
                         elif ran_out:
                             # Workers do not finish in page order: pages
                             # numbered BELOW the one that ran out may still
@@ -901,7 +930,8 @@ def _finish(args, outcomes, blocked, stop_reason, total_results,
                       total_results_first=counted[0] if counted else None,
                       total_results_last=counted[-1] if counted else None,
                       pages_available=pages_available, start_page=args.start_page,
-                      start_url=args.url, final_url=final_url)
+                      start_url=args.url, final_url=final_url,
+                      engine="playwright")
 
 
 def build_parser():

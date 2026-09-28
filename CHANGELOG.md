@@ -7,6 +7,64 @@ toolkit can: a patch release means fixes, not that every flag and default is
 frozen, and a patch that changes behaviour for an existing user leads its
 notes with a warning saying so.
 
+## [0.1.1] — 2026-09-28
+
+Fixes from a second pass over a third-party audit of 0.1.0.
+
+> **Behaviour changes for an existing user:** the daily canary now fetches
+> page 1 only, and every engine WARNS when a run requests `?page=` URLs,
+> which screener.in's robots.txt disallows. `.meta.json` gains fields
+> (`schema_version`, `run_id`, `engine`, `files`); none was removed or
+> renamed. `diff_runs.py` now refuses a JSON that does not match its own
+> sidecar's digest.
+
+### Security
+
+- **The CI secret scan judged the LINE, not the credential.** A line was
+  exempt as soon as it contained `***` or `user:pass` anywhere, so a real
+  `…user:password…@` login or a real URL next to a masked one passed. The
+  allowlist is now matched exactly against each URL's userinfo, and the scan
+  also catches token-only `wss://TOKEN@` endpoints, upper-case 32-hex keys,
+  written-out bearer tokens, and no longer exempts a hex key on a line that
+  merely says "shares" or "shape".
+- **`python3 env_config.py` printed a CDP endpoint or proxy in clear** when
+  its value had no `@` — a token in the query string. Credential variables
+  are now hidden by name, whatever their value looks like.
+- **Raw driver exceptions reached warning logs** (a retry, a failed
+  screenshot, a content read). Every CLI now installs a log filter that
+  redacts each record's final message and traceback.
+- **A JSON-escaped URL (`ws:\/\/login:secret@…`) was not masked.**
+- **The canary uploaded unscrubbed page dumps**, with the anonymous session's
+  csrf token, as public artefacts. They are scrubbed first now.
+
+### Changed
+
+- The canary requests page 1 only; see the warning above.
+- The Scraper API client retries a connection error (no task ran, nothing
+  billed) and reads the policy table's `retry` rather than hard-coding
+  "blocked"; `PagePolicy.retry` had no reader at all. The suite now asserts
+  every policy field has one.
+- The concurrent Playwright path applies the same data-based stop as the
+  sequential one: a page adding no new row ends the listing there.
+- README: Quick start fetches page 1; the Scraper API client's different
+  `--retries`/`--retry-delay` meanings are documented.
+
+### Fixed
+
+- **Runtime captcha detection never ran, in any engine.** The discovery
+  script began ` => {` with no parameter list, a SyntaxError swallowed at
+  debug level; Selenium additionally returned the function instead of calling
+  it. Both fixed, the failure is now a warning, and the suite parses every
+  shipped script with `node --check` and runs discovery in a real page.
+- **An explicitly rendered reCAPTCHA v2 widget was classified as v3** by the
+  HTML detector, and a v2 task sent as v3 is `ERROR_CAPTCHA_UNSOLVABLE`.
+  Found by the first live solve (2026-09-28, 2Captcha's reCAPTCHA v2 demo
+  page); after the fix both the v2 and v1 APIs solved it and the page's own
+  server-side check answered `"success": true`.
+- The offline suite really slept 20 of its 22 seconds (two blocked scenarios
+  waiting out the default `--retry-delay`). It now runs in about a second,
+  and fails if any check sleeps a second or more.
+
 ## [0.1.0] — 2026-09-25
 
 First release on the 2scraper family core, replacing an unpublished first

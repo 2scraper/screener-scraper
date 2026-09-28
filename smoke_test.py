@@ -1258,6 +1258,18 @@ def check_policy_constants_have_consumers():
         check(f"{constant} is read outside {home}"
               + (f" (by {consumers})" if consumers else " — NOTHING reads it"),
               bool(consumers))
+    # And per FIELD of the policy table. `.policy` counted as reading all of
+    # STATE_POLICY while PagePolicy.retry was read by nothing — a column of
+    # measured decisions that changed no behaviour, beside a comment saying
+    # the engines take their retry budget from it.
+    import dataclasses
+    for field in dataclasses.fields(page_flow.PagePolicy):
+        spelling = re.compile(rf"\.policy\.{field.name}\b")
+        consumers = [name for name, source in _module_sources()
+                     if name != "page_flow.py" and spelling.search(source)]
+        check(f"PagePolicy.{field.name} is read by an engine"
+              + (f" ({consumers})" if consumers else " — NOTHING reads it"),
+              bool(consumers))
     # The values themselves must not be copied: an engine spelling out
     # ["per-run", "per-page"] would look correct and drift silently.
     copies = [name for name, source in _module_sources()
@@ -2243,7 +2255,11 @@ def check_engine_flows_on_real_answers():
             with tempfile.TemporaryDirectory() as tmp:
                 sys_argv = sys.argv
                 sys.argv = ["scraper_api_client.py", "--url", url, "--pages", str(pages),
-                            "--delay", "0", "--format", "json", "--key", "k" * 32,
+                            # --retry-delay 0: two of these scenarios end
+                            # blocked, and the default 10s pause made the
+                            # "offline, ~2s" suite take 22s of real sleeping.
+                            "--delay", "0", "--retry-delay", "0",
+                            "--format", "json", "--key", "k" * 32,
                             "--out", os.path.join(tmp, "run")]
                 try:
                     args = sac.parse_args()
@@ -2258,8 +2274,342 @@ def check_engine_flows_on_real_answers():
         sac.fetch_html = real_fetch
 
 
+def check_secret_scan_judges_the_credential_not_the_line():
+    """The CI scan's allowlist is matched against the URL's userinfo, exactly.
+
+    Every value below is ASSEMBLED at run time, so this file does not itself
+    carry a credential-shaped literal for the scan to find.
+    """
+    print("\n[secret scan precision]")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "ci_checks", os.path.join(REPO, ".github", "ci_checks.py"))
+    ci = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ci)
+
+    def flagged(line):
+        hexes = [m for m in ci.HEX32.findall(line) if not ci.HEX32_ALLOWED.search(line)]
+        return bool(ci._credential_findings(line) or ci.BEARER.search(line) or hexes)
+
+    at = "@"
+    pw = "passw" + "0rd9"
+    hex_lower = "0123456789abcdef" * 2
+    must_fail = {
+        "a real login whose name contains 'user:pass'":
+            "http://super" + "user:" + pw + at + "gw.example.net:8000",
+        "a real URL on a line that also prints a masked one":
+            "masked ***:*** vs http://bob:" + pw + at + "10.0.0.1:3128",
+        "a token-only CDP endpoint":
+            "wss://" + "Ab3dE" * 4 + at + "cb.2captcha.com:9222",
+        "an upper-case 32-hex key": "key " + hex_lower.upper(),
+        "a hex key on a line mentioning 'shares'": "shares " + hex_lower,
+        "a bearer token written out": "Authorization: Bearer " + "x1Y2z3" * 5,
+    }
+    for label, line in must_fail.items():
+        check(f"the CI scan flags {label}", flagged(line))
+    must_pass = {
+        "the vendor's braced placeholder":
+            "ws://{login}-zone-x:{password}" + at + "cb.2captcha.com:9222",
+        "the documented user:pass example": "http://user:pass" + at + "host:1",
+        "a hex digest labelled as one": "sha256 " + hex_lower,
+    }
+    for label, line in must_pass.items():
+        check(f"the CI scan still allows {label}", not flagged(line))
+
+
+def check_config_report_never_prints_a_credential():
+    print("\n[config report]")
+    import subprocess
+    token = "qs" + "Tok3n" * 4
+    env = dict(os.environ)
+    env["SCREENER_CDP_ENDPOINT"] = "wss://cb.example.net:9222/?token=" + token
+    env["SCREENER_PROXY"] = "http://10.0.0.1:3128"
+    with tempfile.TemporaryDirectory() as tmp:
+        # From an empty directory, so a developer's own .env is never read.
+        out = subprocess.run([sys.executable, os.path.join(REPO, "env_config.py")],
+                             cwd=tmp, env=env, capture_output=True, text=True,
+                             timeout=60).stdout
+    check("a CDP endpoint carrying its token in the QUERY is not printed",
+          token not in out)
+    check("a proxy value is hidden even with no '@' in it",
+          "10.0.0.1" not in out)
+    check("and the report still says both are set",
+          out.count("hidden") >= 2)
+
+
+def check_every_log_line_is_redacted():
+    print("\n[log redaction]")
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        proxy_pool.install_log_redaction()
+        proxy_pool.install_log_redaction()
+        eq("installing twice adds one filter",
+           sum(isinstance(f, proxy_pool.RedactingFilter) for f in handler.filters), 1)
+        secret = "hun" + "ter2" * 3
+        log = logging.getLogger("smoke.redaction")
+        log.error("Could not capture screenshot: %s",
+                  RuntimeError("net::ERR_PROXY_AUTH at http://bob:" + secret + "@1.2.3.4:8"))
+        try:
+            raise RuntimeError("key=" + secret)
+        except RuntimeError:
+            log.error("crash", exc_info=True)
+        text = buf.getvalue()
+        check("a raw driver exception in a log argument is masked", secret not in text)
+        check("and the host and port survive", "1.2.3.4:8" in text)
+        check("a traceback is masked too", "key=***" in text)
+        escaped = proxy_pool.redact_secret_patterns(
+            '{"cdpurl":"ws:\\/\\/login:' + secret + '@cb.2captcha.com:9222"}')
+        check("a JSON-escaped URL (ws:\\/\\/) is masked", secret not in escaped)
+    finally:
+        root.removeHandler(handler)
+    for name in ("playwright_scraper.py", "puppeteer_scraper.py",
+                 "selenium_scraper.py", "scraper_api_client.py",
+                 "fingerprint_client.py", "env_config.py"):
+        source = open(os.path.join(REPO, name), encoding="utf-8").read()
+        check(f"{name} installs the log redaction filter",
+              "install_log_redaction()" in source)
+
+
+def check_multi_page_runs_are_warned_about_robots():
+    print("\n[robots.txt]")
+    import argparse
+
+    class Logger:
+        def __init__(self):
+            self.lines = []
+
+        def warning(self, msg, *a):
+            self.lines.append(msg % a if a else msg)
+
+        info = warning
+
+    for url, pages, want in (
+            ("https://www.screener.in/market/IN08/", 1, False),
+            ("https://www.screener.in/market/IN08/", 3, True),
+            ("https://www.screener.in/market/IN08/?page=2", 1, True)):
+        log = Logger()
+        args = argparse.Namespace(url=url, pages=pages)
+        cli_types.finish_args(argparse.ArgumentParser(), args, log)
+        eq(f"--pages {pages} of {url.split('screener.in')[1]} "
+           f"{'is' if want else 'is not'} warned about robots.txt",
+           any("robots.txt" in line for line in log.lines), want)
+
+
+def check_diff_refuses_a_mixed_artifact_set():
+    print("\n[artifact set]")
+    import diff_runs
+    with tempfile.TemporaryDirectory() as tmp:
+        prefixes = [os.path.join(tmp, n) for n in ("old", "new")]
+        with redirect_stdout(io.StringIO()):
+            for prefix in prefixes:
+                output_writer.finish_run(
+                    [_row()], prefix, "both", False, blocked=False,
+                    stop_reason="listing_exhausted", pages_requested=1,
+                    pages_completed=1, start_url="https://www.screener.in/market/IN08/",
+                    final_url="https://www.screener.in/market/IN08/", engine="smoke")
+        meta = json.load(open(f"{prefixes[1]}.meta.json", encoding="utf-8"))
+        eq("the sidecar carries a schema version", meta.get("schema_version"),
+           output_writer.SCHEMA_VERSION)
+        check("and a run id", bool(meta.get("run_id")))
+        eq("and the engine that wrote it", meta.get("engine"), "smoke")
+        eq("and a digest for each file it wrote", sorted(meta.get("files", {})),
+           ["csv", "json"])
+        check("a run id is not 32-hex, which the secret scan would flag",
+              "-" in meta["run_id"])
+
+        def run():
+            argv = sys.argv
+            sys.argv = ["diff_runs.py", "--old", f"{prefixes[0]}.json",
+                        "--new", f"{prefixes[1]}.json",
+                        "--out", os.path.join(tmp, "d.json")]
+            try:
+                with redirect_stdout(io.StringIO()) as buf:
+                    rc = diff_runs.main()
+            finally:
+                sys.argv = argv
+            return rc, buf.getvalue()
+
+        rc, _ = run()
+        eq("a self-consistent pair diffs", rc, 0)
+        # A crash between the JSON write and the sidecar write: new data
+        # beside the previous run's sidecar.
+        output_writer.write_json([_row(sku="other")], f"{prefixes[1]}.json")
+        rc, text = run()
+        check("new data beside an older sidecar is refused",
+              rc != 0 and "does not match its .meta.json" in text)
+
+
+def check_concurrent_path_stops_like_the_sequential_one():
+    print("\n[concurrent stop rules]")
+    engine = ENGINES.get("playwright_scraper")
+    if engine is None:
+        skip("concurrent stop rules", "playwright not installed")
+        return
+
+    class _Stub:
+        def __init__(self, *a, **kw):
+            pass
+
+        def open(self):
+            return self
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def outcome(n, skus):
+        o = engine.PageOutcome(page_num=n, url=f"u{n}")
+        o.state = page_flow.PageState(page_flow.CONTENT, "stub",
+                                      total_results=150, pages_available=6)
+        o.products = [_row(sku=s, rank=None) for s in skus]
+        return o
+
+    def fetch_safely(session, args, pool, page_num, url):
+        return outcome(page_num, [f"p{page_num}"])
+
+    def concurrently(args, pool, specs, n):
+        # Page 4 serves page 3's rows again — pagination looping back.
+        pages = {3: ["p3"], 4: ["p3"], 5: ["p5"], 6: ["p6"]}
+        return [outcome(p, pages[p]) for p, _ in specs][::-1], [], False, None
+
+    saved = (engine.sync_playwright, engine._BrowserSession, engine._fetch_safely,
+             engine._fetch_pages_concurrently, engine._between_pages)
+    try:
+        engine.sync_playwright = lambda: _Stub()
+        engine._BrowserSession = _Stub
+        engine._fetch_safely = fetch_safely
+        engine._fetch_pages_concurrently = concurrently
+        engine._between_pages = lambda *a, **kw: None
+        with tempfile.TemporaryDirectory() as tmp:
+            args = engine.parse_args([
+                "--url", "https://www.screener.in/market/IN08/", "--pages", "6",
+                "--concurrency", "3", "--delay", "0", "--format", "json",
+                "--out", os.path.join(tmp, "run")])
+            with redirect_stdout(io.StringIO()):
+                engine.scrape(args)
+            meta = json.load(open(os.path.join(tmp, "run.meta.json"), encoding="utf-8"))
+            rows = json.load(open(os.path.join(tmp, "run.json"), encoding="utf-8"))
+        eq("a concurrent page adding nothing new ends the listing there",
+           meta["stop_reason"], "no_new_listings")
+        eq("and pages after it are dropped, as the sequential loop never "
+           "fetches them", sorted(r["sku"] for r in rows), ["p1", "p2", "p3"])
+    finally:
+        (engine.sync_playwright, engine._BrowserSession, engine._fetch_safely,
+         engine._fetch_pages_concurrently, engine._between_pages) = saved
+
+
+# The shape of 2Captcha's own reCAPTCHA v2 demo page (2captcha.com/demo/
+# recaptcha-v2, 2026-09-28), reduced to what a detector reads: an explicit
+# loader and a widget element. The sitekey is a made-up one of the right shape.
+_V2_KEY = "6L" + "Xx" * 19
+_V2_EXPLICIT = ('<script src="https://www.google.com/recaptcha/api.js?'
+                'onload=onRecaptchaLoad&render=explicit"></script>'
+                '<div class="g-recaptcha" data-sitekey="' + _V2_KEY + '"></div>'
+                '<script>function onRecaptchaLoad(){grecaptcha.render("x")}</script>')
+
+
+def check_captcha_javascript_actually_runs():
+    """The discovery script shipped as ` => {` — no parameter list — so it was
+    a SyntaxError in every engine, logged at debug level and never noticed.
+    Nothing offline had ever parsed it, let alone run it."""
+    print("\n[captcha javascript]")
+    js = captcha_solver.CAPTCHA_DISCOVERY_JS.strip()
+    check("the discovery script is an arrow function with a parameter list",
+          js.startswith("() =>"))
+    check("the injection script is an arrow function taking the token",
+          captcha_solver.INJECT_TOKEN_FN.strip().startswith("(token) =>"))
+    selenium_src = open(os.path.join(REPO, "selenium_scraper.py"), encoding="utf-8").read()
+    check("Selenium INVOKES the discovery function rather than returning it",
+          "return ({CAPTCHA_DISCOVERY_JS})();" in selenium_src)
+
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        skip("the captcha scripts parse as JavaScript", "node not installed")
+    else:
+        sources = {
+            "discovery": f"const f = {captcha_solver.CAPTCHA_DISCOVERY_JS};",
+            "injection": f"const f = {captcha_solver.INJECT_TOKEN_FN};",
+            "selenium injection body":
+                f"function f() {{{captcha_solver.INJECT_TOKEN_BODY}}}",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, code in sources.items():
+                path = os.path.join(tmp, "s.js")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(code)
+                rc = subprocess.run([node, "--check", path], capture_output=True,
+                                    text=True, timeout=60).returncode
+                check(f"the {label} script parses as JavaScript", rc == 0)
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        skip("the discovery script runs in a real page", "playwright not installed")
+        return
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            try:
+                page = browser.new_page()
+                # Offline: every request is refused, so only the markup counts.
+                page.route("**/*", lambda route: route.abort())
+                page.set_content(_V2_EXPLICIT)
+                info = page.evaluate(captcha_solver.CAPTCHA_DISCOVERY_JS)
+            finally:
+                browser.close()
+    except Exception as e:  # noqa: BLE001 — no browser binary in this environment
+        skip("the discovery script runs in a real page", f"no browser: {type(e).__name__}")
+        return
+    runtime = captcha_solver.challenge_from_discovery(info)
+    check("run in a page, it finds the widget", bool(info and info.get("found")))
+    eq("and reads the explicit loader as v2", runtime and runtime.kind, "recaptcha_v2")
+
+
+def check_recaptcha_version_from_markup():
+    print("\n[recaptcha version]")
+    found = captcha_solver.detect_in_html(_V2_EXPLICIT, "https://example.test/")
+    eq("an explicitly rendered widget is v2, not v3 (a v2 task sent as v3 is "
+       "ERROR_CAPTCHA_UNSOLVABLE)", found and found.kind, "recaptcha_v2")
+    invisible = _V2_EXPLICIT.replace('data-sitekey=', 'data-size="invisible" data-sitekey=')
+    found = captcha_solver.detect_in_html(invisible, "https://example.test/")
+    eq("with data-size=invisible it is v2 invisible", found and found.kind,
+       "recaptcha_v2_invisible")
+    v3 = _V2_EXPLICIT.replace("render=explicit", "render=" + _V2_KEY)
+    found = captcha_solver.detect_in_html(v3, "https://example.test/")
+    eq("a loader rendering the sitekey itself is v3", found and found.kind,
+       "recaptcha_v3")
+
+
+LONG_SLEEPS = []
+
+
+def _guard_real_sleeps():
+    """Record every time.sleep of a second or more, with its caller."""
+    import time
+    real = time.sleep
+
+    def sleep(seconds):
+        if seconds >= 1:
+            caller = sys._getframe(1)
+            LONG_SLEEPS.append(f"{os.path.basename(caller.f_code.co_filename)}:"
+                               f"{caller.f_code.co_name}({seconds}s)")
+        real(seconds)
+    time.sleep = sleep
+
+
 def main() -> int:
     logging.basicConfig(level=logging.ERROR)
+    _guard_real_sleeps()
     print("screener-scraper offline suite")
     print("=" * 62)
     for group in (check_parser_values, check_parser_refuses_to_guess,
@@ -2290,8 +2640,21 @@ def main() -> int:
                   check_writes_are_atomic,
                   check_cli_refuses_impossible_values,
                   check_diff_refuses_a_window_comparison,
-                  check_engine_flows_on_real_answers):
+                  check_engine_flows_on_real_answers,
+                  check_secret_scan_judges_the_credential_not_the_line,
+                  check_config_report_never_prints_a_credential,
+                  check_every_log_line_is_redacted,
+                  check_multi_page_runs_are_warned_about_robots,
+                  check_diff_refuses_a_mixed_artifact_set,
+                  check_concurrent_path_stops_like_the_sequential_one,
+                  check_captcha_javascript_actually_runs,
+                  check_recaptcha_version_from_markup):
         group()
+    # The offline suite must not really wait out a retry delay: 22s of it
+    # was two blocked scenarios sleeping the default --retry-delay.
+    check("no offline check really slept a retry delay"
+          + (f" (slept in: {', '.join(LONG_SLEEPS)})" if LONG_SLEEPS else ""),
+          not LONG_SLEEPS)
 
     print("\n" + "=" * 62)
     print(f"{len(PASSED)} passed, {len(FAILED)} failed, {len(SKIPPED)} skipped")

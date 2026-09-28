@@ -62,9 +62,10 @@ from typing import Optional
 
 import requests
 
-from proxy_pool import redact_secret_patterns
+from proxy_pool import install_log_redaction, redact_secret_patterns
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+install_log_redaction()
 logger = logging.getLogger("fingerprint_client")
 
 API_BASE = "https://api.2captcha.com"

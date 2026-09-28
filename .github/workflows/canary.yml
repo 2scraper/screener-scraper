@@ -11,10 +11,17 @@ name: canary
 # green every day while testing nothing. The proxy secret is used when it is
 # set, and only changes how an exit 3 is read.
 #
-# --pages 3, not 1: with one page pagination is never exercised. And the
-# assertions include the site's own arithmetic — ranks 1-75 with no gap —
-# because an out-of-range ?page= here is answered with the LAST page again,
-# full of real rows.
+# --pages 1, and that is a POLICY decision, not a technical one. screener.in's
+# robots.txt disallows `/*?page=` for all user agents, so a daily 3-page run
+# was this project itself automating the one thing it tells users to check
+# before doing. Pagination is still covered: offline, by the fixtures in
+# smoke_test.py (the out-of-range ?page= answer, rank gaps, catalogue
+# mutation), and a user who does run multi-page jobs sees the same check in
+# the sidecar. What the live run keeps is the part only a live run can see —
+# the site's served table shape, units and ranks on page 1.
+#
+# The HTML dump is SCRUBBED before upload: a raw page carries the anonymous
+# session's csrf token, and this repository's artefacts are public.
 on:
   schedule:
     # Off the hour, so it is not competing with every other cron job for
@@ -61,7 +68,7 @@ jobs:
           set +e
           python3 playwright_scraper.py \
             --url "https://www.screener.in/market/IN08/IN0801/IN080101/" \
-            --pages 3 --out canary_run --dump-html canary_run.html
+            --pages 1 --out canary_run --dump-html canary_run.html
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
       - name: Interpret the exit code
@@ -91,10 +98,11 @@ jobs:
           import json, sys
           from pathlib import Path
 
-          PAGES_REQUESTED = 3
-          # 25 rows per page, so three pages is 75, and this sector held 164
-          # companies on 2026-09-25. The floor sits below 75 rather than on it.
-          MIN_ROWS = 60
+          PAGES_REQUESTED = 1
+          # 25 rows per page for an anonymous visitor (?limit= is ignored),
+          # and this sector held 164 companies on 2026-09-25 — so page 1 is
+          # exactly 25. The floor sits just below it rather than on it.
+          MIN_ROWS = 20
 
           rows = json.loads(Path("canary_run.json").read_text())
           meta = json.loads(Path("canary_run.meta.json").read_text())
@@ -108,15 +116,17 @@ jobs:
               fail.append(f"stopped after {meta.get('pages_completed')} of "
                           f"{PAGES_REQUESTED} pages (stop_reason="
                           f"{meta.get('stop_reason')!r})")
-          if meta.get("addressable") is not True:
-              fail.append("page 2 did not carry rows page 1 lacked — the ?page= "
-                          "convention has stopped working")
+          # pages_available is read from page 1's own "Showing page 1 of N",
+          # which is what pagination planning depends on.
+          if not (meta.get("pages_available") or 0) >= 2:
+              fail.append(f"pages_available is {meta.get('pages_available')!r} — "
+                          f"page 1 no longer states how many pages exist")
           if len({r["sku"] for r in rows}) != len(rows):
               fail.append("duplicate company ids across pages")
           if len({(r["page"], r["position"]) for r in rows}) != len(rows):
               fail.append("page+position is not unique")
-          # The site numbers its rows globally, so three pages from the
-          # start are ranks 1..75 exactly. A shift or a gap is a lost page.
+          # The site numbers its rows globally, so page 1 is ranks 1..25
+          # exactly. A shift or a gap is a lost row.
           ranks = sorted(r["rank"] for r in rows if r.get("rank") is not None)
           if ranks != list(range(1, len(rows) + 1)):
               fail.append(f"ranks are not 1..{len(rows)} (gaps: {meta.get('rank_gaps')})")
@@ -132,6 +142,24 @@ jobs:
           for line in fail:
               print(f"::error::{line}")
           sys.exit(1 if fail else 0)
+          EOF
+
+      - name: Scrub the HTML dumps before they become public artefacts
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob
+          from pathlib import Path
+          from make_fixtures import scrub, scrub_problems
+          for name in glob.glob("canary_run.html*") + glob.glob("canary_run_page*_debug.html"):
+              path = Path(name)
+              text = scrub(path.read_text(encoding="utf-8", errors="replace"))
+              if scrub_problems(text):
+                  # Not uploaded at all rather than uploaded half-scrubbed.
+                  path.unlink()
+                  print(f"::warning::{name} still looked credential-shaped after scrubbing; not uploaded")
+              else:
+                  path.write_text(text, encoding="utf-8")
           EOF
 
       - name: Upload run artefacts

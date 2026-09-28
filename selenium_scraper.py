@@ -67,9 +67,11 @@ from output_writer import failure_stop_reason, finish_run, merge_pages
 from product_parser import SELECTORS, parse_products
 from proxy_pool import (ROTATE_MODES, ProxyError, check_exit_or_raise,
                         from_args as proxy_pool_from_args, mask,
-                        redact_secret_patterns, to_selenium)
+                        install_log_redaction, redact_secret_patterns,
+                        to_selenium)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+install_log_redaction()
 logger = logging.getLogger("selenium_scraper")
 
 # --- the whole of this engine's site knowledge, identical to its twins' -----
@@ -221,9 +223,9 @@ def _discover_captcha(driver, url: str):
     each engine growing its own dialect of the same script.
     """
     try:
-        info = driver.execute_script(f"return ({CAPTCHA_DISCOVERY_JS});")
+        info = driver.execute_script(f"return ({CAPTCHA_DISCOVERY_JS})();")
     except WebDriverException as e:
-        logger.debug("Runtime captcha discovery failed: %s", e)
+        logger.warning("Runtime captcha discovery failed: %s", e)
         return None
     return challenge_from_discovery(info, page_url=url)
 
@@ -565,7 +567,8 @@ def scrape(args) -> int:
                       total_results_first=counted[0] if counted else None,
                       total_results_last=counted[-1] if counted else None,
                       pages_available=pages_available, start_page=start,
-                      start_url=args.url, final_url=final_url)
+                      start_url=args.url, final_url=final_url,
+                      engine="selenium")
 
 
 def build_parser():

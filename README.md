@@ -26,14 +26,18 @@ python3 -m venv venv && ./venv/bin/pip install -r requirements.txt -r requiremen
 
 ./venv/bin/python playwright_scraper.py \
   --url "https://www.screener.in/market/IN08/IN0801/IN080101/" \
-  --pages 50 --out it_software
+  --pages 1 --out it_software
 ```
 
-That run asks for 50 pages; the sector has 7, so it fetches 7 and stops —
-the scraper reads the site's own "Showing page 1 of 7" and never plans past
-the last page. Measured 2026-09-25: **164 rows against the site's own "164
-results found", ranks 1–164 with no gap, `status: complete`,
-`coverage: exhaustive`, exit 0.**
+That is page 1 of the sector: 25 rows, the site's own `total_results` and
+`pages_available` in `it_software.meta.json`, `coverage: window`. **Pages
+after the first are `?page=` URLs, which screener.in's robots.txt disallows
+for all user agents** — read [Legal](#legal) before asking for more; every
+engine prints the same warning when a run would. Asked for 50 pages, the
+scraper reads the site's own "Showing page 1 of 7" and never plans past the
+last page; measured 2026-09-25 on this sector: 164 rows against the site's
+own "164 results found", ranks 1–164 with no gap, `status: complete`,
+`coverage: exhaustive`, exit 0.
 
 ## What the paid products buy you — and when you need none of them
 
@@ -96,7 +100,11 @@ site's own `total_results` and `pages_available`, `coverage` (`exhaustive`
 when the run started at page 1 and reached the end, `tail` when it reached
 the end from a later start page, `window` when it stopped at `--pages`),
 `start_page`, and `rank_gaps` — site ranks missing from the merged rows, which
-is proof of a lost page rather than a guess.
+is proof of a lost page rather than a guess. It also records `schema_version`, a
+`run_id`, the `engine`, and under `files` the size and SHA-256 of each data
+file it describes: the files are each written atomically but not as a set,
+so a crash between two writes can leave new data beside an older sidecar —
+`diff_runs.py` checks the digest and refuses such a pair.
 
 **Exit codes**, shared by every engine: `0` ok · `1` crash · `2` bad usage ·
 `3` blocked · `4` the site says the listing is empty · `5` the content was
@@ -133,6 +141,9 @@ Known engine limits, stated rather than left to be discovered:
   the other two accept the flags for parity and say that they ignore them.
 
 ## Usage
+
+The first three examples request `?page=` URLs, which robots.txt disallows —
+see [Legal](#legal). They show what the flags do, not a recommendation.
 
 ```bash
 # A stock screen, every page it has.
@@ -171,7 +182,11 @@ Shared by the three browser engines: `--url --pages --category --format --out
 --dump-html --headless/--headful --fingerprint --fp-tags --fp-country`. Run
 any script with `--help` for the details. `scraper_api_client.py` takes
 `--key`, `--cdp-url` and `--wait-text/--wait-element/--wait-state` instead of
-the browser flags.
+the browser flags. Two flags it shares by name mean something different
+there, because each attempt is a billed API task: its `--retries` counts
+EXTRA attempts (default 1; the browser engines count total attempts, default
+3), and `--retry-delay` defaults to 10s, flat, where the browser engines back
+off from 2s.
 
 There is deliberately **no `--limit`**: the page offers "Results per page 10
 / 25 / 50", but `?limit=10` and `?limit=50` both returned 25 rows to an
@@ -199,10 +214,14 @@ looks configurable and is not.
   each verified to parse identically to its untrimmed original. `pytest`
   runs the same suite. CI runs it on Python 3.9 and 3.12, once per engine in
   its own virtualenv, and builds the Docker image.
-- **Live:** `canary.yml` runs a real 3-page scrape daily, **ungated** — this
-  site needs no credential, so a canary that could pass without one is not
-  gated on one — and asserts ranks 1–75, INR on every row and market cap on
-  every row. Its first run, dispatched 2026-09-25 from a bare GitHub runner
+- **Live:** `canary.yml` runs a real scrape of **page 1 only** daily,
+  **ungated** — this site needs no credential, so a canary that could pass
+  without one is not gated on one — and asserts ranks 1–25, INR and market
+  cap on every row, and that page 1 still states its page count. It was 3
+  pages until 0.1.1; `?page=` is disallowed by robots.txt, so pagination is
+  covered by the offline fixtures instead. Its HTML dumps are scrubbed of the
+  session's csrf token before they are uploaded as public artefacts. The
+  3-page version's first run, dispatched 2026-09-25 from a bare GitHub runner
   (a datacentre address, no proxy, no key), passed: 75 rows, ranks 1–75,
   `status: complete`. An exit 3 from a bare runner is still reported as a
   notice rather than a failure, since a datacentre address can be refused on
