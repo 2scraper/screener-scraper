@@ -2556,19 +2556,35 @@ def check_captcha_javascript_actually_runs():
     except ImportError:
         skip("the discovery script runs in a real page", "playwright not installed")
         return
+    # Only a browser that will not START is a skip. An error from the
+    # script itself is a FAILURE: the first version of this check caught
+    # both, and on the unfixed code reported the SyntaxError it exists to
+    # find as "skipped, no browser".
+    info, error = None, None
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch()
+            try:
+                browser = pw.chromium.launch()
+            except Exception as e:  # noqa: BLE001 — no browser binary here
+                skip("the discovery script runs in a real page",
+                     f"no browser: {type(e).__name__}")
+                return
             try:
                 page = browser.new_page()
                 # Offline: every request is refused, so only the markup counts.
                 page.route("**/*", lambda route: route.abort())
                 page.set_content(_V2_EXPLICIT)
                 info = page.evaluate(captcha_solver.CAPTCHA_DISCOVERY_JS)
+            except Exception as e:  # noqa: BLE001 — reported as a failure below
+                error = f"{type(e).__name__}: {str(e).splitlines()[0][:120]}"
             finally:
                 browser.close()
-    except Exception as e:  # noqa: BLE001 — no browser binary in this environment
-        skip("the discovery script runs in a real page", f"no browser: {type(e).__name__}")
+    except Exception as e:  # noqa: BLE001 — the driver itself is unavailable
+        skip("the discovery script runs in a real page",
+             f"no playwright driver: {type(e).__name__}")
+        return
+    if not check("the discovery script runs in a real page without an error"
+                 + (f" ({error})" if error else ""), error is None):
         return
     runtime = captcha_solver.challenge_from_discovery(info)
     check("run in a page, it finds the widget", bool(info and info.get("found")))
