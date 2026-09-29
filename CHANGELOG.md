@@ -7,7 +7,7 @@ toolkit can: a patch release means fixes, not that every flag and default is
 frozen, and a patch that changes behaviour for an existing user leads its
 notes with a warning saying so.
 
-## [Unreleased]
+## [0.2.1] — 2026-09-29
 
 ### Fixed
 
