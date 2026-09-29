@@ -102,9 +102,25 @@ jobs:
           # Proves each lock is self-consistent on its own.
           pip check
 
+      - name: A browser for this engine
+        # The suite launches engines for real in places. Playwright brings its own
+        # Chromium; the other two use the runner's Google Chrome.
+        run: |
+          . .venv-${{ matrix.engine }}/bin/activate
+          if [ "${{ matrix.engine }}" = playwright ]; then
+            python -m playwright install --with-deps chromium
+          else
+            echo "PYPPETEER_EXECUTABLE_PATH=$(command -v google-chrome)" >> "$GITHUB_ENV"
+            google-chrome --version
+          fi
+
       - name: The suite, with THIS engine importable
         # The other two are absent by design, so the suite will report skips
         # for them; what must NOT happen is this engine's group skipping.
+        # `shell: bash` turns on pipefail: GitHub runs an UNSPECIFIED shell as
+        # `bash -e` without it, so `smoke_test.py | tee` took tee's exit status
+        # and a failing suite went green (found 2026-09-29 in a sibling repo).
+        shell: bash
         run: |
           set -e
           . .venv-${{ matrix.engine }}/bin/activate
@@ -113,6 +129,9 @@ jobs:
             puppeteer)  module=puppeteer_scraper ;;
             selenium)   module=selenium_scraper ;;
           esac
+          # The import itself, first: it fails BY NAME whatever wording the
+          # suite uses for a skip (family template §26).
+          python -c "import $module"
           python smoke_test.py | tee smoke.log
           if grep -q "SKIPPED.*$module" smoke.log; then
             echo "FAILED: $module reported skipped although ${{ matrix.engine }} is installed in this job — likely a real import error."
