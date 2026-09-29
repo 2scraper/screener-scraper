@@ -544,8 +544,13 @@ def check_remote_connect_failures_are_redacted():
         source = open(os.path.join(REPO, f"{name}.py"), encoding="utf-8").read()
         check(f"{name} wraps its remote connect rather than letting the "
               f"library's own error escape",
-              re.search(r"Could not (?:connect to --cdp-endpoint|attach to)[^\n]*\n?[^\n]*"
-                        r"redact_secret_patterns\(str\(e\)\)", source) is not None)
+              # The redaction may sit a line above the raise (the connect
+              # retry loop redacts once into `text` and reuses it), so look
+              # for it inside the SAME except block rather than beside it.
+              any("Could not connect to --cdp-endpoint" in blk or "Could not attach to" in blk
+                  for blk in re.findall(r"except [\w.(), ]+ as e:.*?(?=\n\s*(?:except|finally|else)\b|\n\S)",
+                                        source, re.S)
+                  if re.search(r"redact_secret_patterns\((?:str\(e\)|f\"\{type\(e\)\.__name__\}: \{e\}\")\)", blk)))
         check(f"{name} redacts a traceback before printing it",
               "redact_secret_patterns(traceback.format_exc())" in source)
 
@@ -2942,6 +2947,134 @@ def _guard_real_sleeps():
     time.sleep = sleep
 
 
+
+def check_family_sync_2026_09_29():
+    """Three defects found in this repo by a family-wide pass on 2026-09-29."""
+    print("\n[family sync 2026-09-29]")
+    import shutil
+    import subprocess
+    import tempfile
+    # 1. The fingerprint init script was syntactically broken JavaScript
+    #    ("( => {"), and a syntax error in an init script is SILENT: the
+    #    page runs unpatched and --fingerprint did nothing for anyone.
+    import fingerprint_client
+    node = shutil.which("node")
+    if node:
+        path = os.path.join(tempfile.mkdtemp(), "fp.js")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(fingerprint_client.playwright_init_script({}))
+        r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        check("the fingerprint init script parses as JavaScript"
+              + ("" if r.returncode == 0 else f" — {r.stderr.strip()[:160]}"), r.returncode == 0)
+    else:
+        skip("the fingerprint init script parses as JavaScript", "node not installed; CI has it")
+    # 2. `env_config.py --help` read .env: ci_checks runs every CLI's --help.
+    r = subprocess.run([sys.executable, "env_config.py", "--help"], cwd=REPO,
+                       capture_output=True, text=True)
+    check("`env_config.py --help` answers without reading .env",
+          r.returncode == 0 and ".env file:" not in r.stdout)
+    # 4. The Scraping Browser connect policy (template §26): retry a lock or
+    #    an outage, never an expired login, and say which it was.
+    eq("a 500 on the upgrade is retried", proxy_pool.cdp_retryable(
+        "WebSocket error: ws://***:***@cb.2captcha.com:9222/ 500 Internal Server Error"), True)
+    eq("a 401 is not", proxy_pool.cdp_retryable("<ws unexpected response> 401 Unauthorized"), False)
+    eq("a number that merely CONTAINS 500 is not a 5xx", proxy_pool.cdp_retryable("port 5001 reset"), False)
+    check("a 401 is explained as expired credentials",
+          "expire" in proxy_pool.cdp_refusal_advice("401 Unauthorized"))
+    engine = ENGINES.get("playwright_scraper")
+    if engine is None:
+        skip("the Playwright engine retries a locked profile", "playwright not installed")
+    else:
+        calls = []
+
+        class _Flaky:
+            def connect_over_cdp(self, endpoint, timeout=None):
+                calls.append(1)
+                if len(calls) < 3:
+                    raise RuntimeError("WebSocket error: ws://***:***@cb.2captcha.com:9222/ 500 Internal Server Error")
+                raise _Connected()
+
+        class _Connected(Exception):
+            pass
+
+        class _PW:
+            chromium = _Flaky()
+
+        class _Args:
+            cdp_endpoint = "ws://***:***@cb.2captcha.com:9222"
+
+        real_sleep = engine.time.sleep
+        engine.time.sleep = lambda s: None
+        try:
+            engine._connect_remote(_PW(), _Args())
+        except _Connected:
+            pass
+        except RuntimeError:
+            pass
+        finally:
+            engine.time.sleep = real_sleep
+        eq("the Playwright engine tried a locked profile three times", len(calls), 3)
+    # 5. A pipe in a workflow step hides the left side's failure unless
+    #    pipefail is on, and GitHub runs an unspecified shell without it.
+    import re as _re
+    wf_dir = os.path.join(REPO, ".github", "workflows")
+    piped = 0
+    if os.path.isdir(wf_dir):
+        for name in sorted(os.listdir(wf_dir)):
+            text = open(os.path.join(wf_dir, name), encoding="utf-8").read()
+            for step in _re.split(r"\n\s*- (?:name|uses):", text):
+                code = "\n".join(ln for ln in step.splitlines()
+                                 if ln.strip() and not ln.strip().startswith("#"))
+                m = _re.search(r"run:\s*\|?(.*)", code, _re.S)
+                if m and _re.search(r"python[^\n]*\|\s*tee", m.group(1)):
+                    piped += 1
+                    check(f"{name}: a piped python step runs with pipefail",
+                          "shell: bash" in code or "pipefail" in code)
+        check(f"the pipefail check found the piped steps it guards ({piped})", piped >= 1)
+    else:
+        skip("workflow pipefail", "no .github/workflows in this tree")
+    # 6. The secret scan skips a virtualenv by its marker, not its name —
+    #    and still reads an ordinary untracked directory. Planted both ways.
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("ci_checks_fs", os.path.join(REPO, ".github", "ci_checks.py"))
+    # This repo's scan asks GIT for the file list, so outside a git checkout
+    # there is nothing for it to walk — that is a skip, not a pass or a fail.
+    if spec and os.path.isdir(os.path.join(REPO, ".github")) and os.path.isdir(os.path.join(REPO, ".git")):
+        cc = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(cc)
+        venv = os.path.join(REPO, ".venv-plantedcheck")
+        plain = os.path.join(REPO, "plantedcheck-plain")
+        key = "b" * 32
+        try:
+            os.makedirs(os.path.join(venv, "lib"), exist_ok=True)
+            open(os.path.join(venv, "pyvenv.cfg"), "w").write("home = /usr\n")
+            open(os.path.join(venv, "lib", "vendored.py"), "w").write(f"# {key}\n")
+            os.makedirs(plain, exist_ok=True)
+            open(os.path.join(plain, "leak.py"), "w").write(f"# {key}\n")
+            cc._VENV_CACHE.clear()
+            scanned = {str(p) for p in cc.scanned_files()}
+            check("the scan skips a virtualenv whatever it is called (pyvenv.cfg)",
+                  not any(".venv-plantedcheck" in p for p in scanned))
+            check("...and still reads an ordinary untracked directory",
+                  any("plantedcheck-plain" in p for p in scanned))
+        finally:
+            shutil.rmtree(venv, ignore_errors=True)
+            shutil.rmtree(plain, ignore_errors=True)
+    else:
+        skip("secret scan virtualenv rule", "no .github or no git checkout here")
+    # 3. .gitignore by SHAPE: a renamed .env, a run directory, a paged dump.
+    if shutil.which("git") and os.path.isdir(os.path.join(REPO, ".git")):
+        for name, ignored in ((".env.bak", True), (".env.local", True), ("live/dump.html", True),
+                              ("out.json.page3", True), ("captures/x.html", True),
+                              (".env.example", False), ("sample_output.json", False)):
+            r = subprocess.run(["git", "check-ignore", "-q", name], cwd=REPO)
+            check(f"{name} is {'ignored' if ignored else 'NOT ignored'}",
+                  (r.returncode == 0) == ignored)
+    else:
+        skip(".gitignore shapes", "not a git checkout")
+
+
+
 def main() -> int:
     logging.basicConfig(level=logging.ERROR)
     _guard_real_sleeps()
@@ -2986,7 +3119,8 @@ def main() -> int:
                   check_recaptcha_version_from_markup,
                   check_fingerprint_refusal_is_an_api_error,
                   check_supply_chain_is_pinned,
-                  check_http_engine):
+                  check_http_engine,
+                  check_family_sync_2026_09_29):
         group()
     # The offline suite must not really wait out a retry delay: 22s of it
     # was two blocked scenarios sleeping the default --retry-delay.

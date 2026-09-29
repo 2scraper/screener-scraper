@@ -9,8 +9,36 @@ notes with a warning saying so.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by a family-wide pass against the template on 2026-09-29, measured on
+a fresh clone of every repo in the organisation.
+
+- **`--fingerprint` never patched anything.** The init script it installs
+  was syntactically broken JavaScript (`( => {` — the parameter list and the
+  IIFE call were missing), and a browser drops a broken init script
+  silently. Fixed; the suite now runs `node --check` on it.
+- **pyppeteer could not authenticate a proxy on current Chrome.**
+  `page.authenticate()` uses `Network.setRequestInterception`, which current
+  Chrome no longer has ("wasn't found", exit 5 before the first request —
+  measured 2026-09-29 in rosreestr-scraper, which shares this engine code).
+  Proxy 407s are now answered through the CDP Fetch domain.
+- **A failing suite could turn the engine CI job green.** The step piped
+  `smoke_test.py` into `tee` under GitHub's default shell, which has no
+  pipefail. It now runs with `shell: bash`, imports the engine by name
+  first, installs the browser the engine drives, and the suite fails if any
+  piped step lacks pipefail.
+- **`env_config.py --help` read `.env`.** A help screen now opens no
+  credentials file.
+
 ### Changed
 
+- **Connecting to the Scraping Browser API** follows one policy in every
+  engine (family template §26): three attempts 3 s apart for a locked
+  profile or an outage, none for an expired login (401), and a message
+  naming the cause — including the service's own `profile_locked`.
+  pyppeteer's per-attempt timeout is 10 s, and the orphaned-task traceback
+  after a refused handshake is filtered.
 - README and TROUBLESHOOTING state what the 2026-09-28 live runs measured:
   the Scraping Browser API, the Scraper API and a 2Captcha proxy each served
   page 1 in full; captcha solving was verified on 2Captcha's reCAPTCHA v2
