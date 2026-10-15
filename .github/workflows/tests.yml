@@ -130,7 +130,7 @@ jobs:
             selenium)   module=selenium_scraper ;;
           esac
           # The import itself, first: it fails BY NAME whatever wording the
-          # suite uses for a skip (family template §26).
+          # suite uses for a skip.
           python -c "import $module"
           python smoke_test.py | tee smoke.log
           if grep -q "SKIPPED.*$module" smoke.log; then

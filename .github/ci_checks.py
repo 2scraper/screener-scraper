@@ -260,14 +260,49 @@ CAPTURE_SHAPES = (
 )
 
 
-def _git_files(*flags):
-    out = subprocess.run(["git", "ls-files", "-z", *flags], cwd=REPO,
-                         capture_output=True, text=True)
+class GitUnavailable(Exception):
+    """`git ls-files` could not answer: no git, or not a checkout."""
+
+
+def _git_list(*flags):
+    try:
+        out = subprocess.run(["git", "ls-files", "-z", *flags], cwd=REPO,
+                             capture_output=True, text=True)
+    except OSError as e:
+        raise GitUnavailable(str(e)) from e
     if out.returncode != 0:
-        return
-    for rel in out.stdout.split("\0"):
-        if rel:
-            yield REPO / rel
+        raise GitUnavailable(out.stderr.strip() or f"exit {out.returncode}")
+    return [REPO / rel for rel in out.stdout.split("\0") if rel]
+
+
+def _git_files(*flags):
+    try:
+        return _git_list(*flags)
+    except GitUnavailable:
+        return []
+
+
+# Directories the disk walk below never enters. Matched on the path RELATIVE
+# to the repo, so a clone that happens to live under a directory called
+# `build` or `tmp` is still scanned.
+_WALK_SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules",
+                   ".fingerprint_cache"}
+
+
+def _disk_files():
+    """Every file under REPO, for a tree git cannot describe.
+
+    A source tree unpacked from an archive has no `.git`, and asking git
+    there used to return nothing at all, so the scan printed "0 files
+    scanned, nothing credential-shaped" and passed. With no .gitignore to
+    consult, this walk reads everything except caches and virtualenvs.
+    """
+    for path in sorted(REPO.rglob("*")):
+        rel_parts = path.relative_to(REPO).parts
+        if any(part in _WALK_SKIP_DIRS for part in rel_parts[:-1]):
+            continue
+        if path.is_file():
+            yield path
 
 
 def tracked_files():
@@ -284,7 +319,7 @@ def tracked_files():
 # into pip's vendored code and flags a 32-hex string in `_elffile.py` as
 # key-shaped. Correct about the string, wrong about the file — and it is the
 # FIRST thing a new user sees from `python3 smoke_test.py`. A guard people
-# have to argue with is one they learn to suppress (CLAUDE.md §22).
+# have to argue with is one they learn to suppress.
 #
 # Deliberately NOT a narrowing of what gets scanned: an untracked file is
 # still read, because a key pasted into a scratch file beside the scripts is
@@ -328,7 +363,13 @@ def scanned_files():
                           machine that had ever run the scraper for real,
                           which is the machine most likely to run it.
     """
-    for path in _git_files("--cached", "--others", "--exclude-standard"):
+    try:
+        candidates = _git_list("--cached", "--others", "--exclude-standard")
+    except GitUnavailable as e:
+        print(f"note     git cannot list this tree ({e}); scanning every file "
+              f"on disk instead")
+        candidates = _disk_files()
+    for path in candidates:
         if not path.is_file() or path.suffix.lower() in BINARY_SUFFIXES:
             continue
         if _is_in_virtualenv(path):
@@ -452,6 +493,10 @@ def secret_check():
                           f"make_fixtures.py, which scrubs them and proves "
                           f"the trim parses identically.")
 
+    if scanned == 0:
+        # A scan that read nothing has proved nothing, and must not say "ok".
+        failed.append("the credential scan read 0 files, so it checked "
+                      "nothing; run it from the repository")
     if not failed:
         print(f"ok       {scanned} files scanned, nothing credential-shaped, "
               f"no raw capture tracked")

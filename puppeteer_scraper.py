@@ -141,7 +141,7 @@ async def _open_browser(args, pool):
         # its receive loop, the caller sees only a timeout, and the orphaned
         # task prints a traceback AFTER a correct exit. So: a short timeout
         # per attempt, proxy_pool's retry policy, and that one traceback
-        # shape filtered (family template §26).
+        # shape filtered.
         _quiet_refused_handshakes()
         browser = None
         for attempt in range(1, CDP_CONNECT_ATTEMPTS + 1):

@@ -165,11 +165,11 @@ what CI, the canary and the Docker image install. A weekly `pip-audit` run
 checks every lock against the advisory databases.
 
 **The pyppeteer engine carries a known-vulnerable urllib3.** pyppeteer
-requires `urllib3<2`, and five published urllib3 advisories are fixed only in
+requires `urllib3<2`, and seven published urllib3 advisories are fixed only in
 2.x — among them one where a cross-origin redirect can forward
 `Proxy-Authorization` to the new host (GHSA-qccp-gfcp-xxvc). In that engine's
 virtualenv `requests` uses the same urllib3, so the proxy preflight and the
-captcha API calls do too. The audit ignores exactly those five, by ID; prefer
+captcha API calls do too. The audit ignores exactly those seven, by ID; prefer
 Playwright if you run with proxy credentials.
 
 ## Usage
@@ -255,9 +255,11 @@ looks configurable and is not.
   session's csrf token before they are uploaded as public artefacts. The
   3-page version's first run, dispatched 2026-09-25 from a bare GitHub runner
   (a datacentre address, no proxy, no key), passed: 75 rows, ranks 1–75,
-  `status: complete`. An exit 3 from a bare runner is still reported as a
-  notice rather than a failure, since a datacentre address can be refused on
-  a later day for reasons that are not a site change.
+  `status: complete`. The canary is green only when it parsed real rows: a
+  block (exit 3), an empty listing, a failed load or a partial run fails it,
+  from a bare runner as well. A block from a datacentre address may be the
+  address rather than the site, and setting the `SCREENER_PROXY` secret
+  tells the two apart.
 
 ## Legal
 

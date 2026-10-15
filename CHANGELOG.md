@@ -7,6 +7,37 @@ toolkit can: a patch release means fixes, not that every flag and default is
 frozen, and a patch that changes behaviour for an existing user leads its
 notes with a warning saying so.
 
+## [Unreleased]
+
+> **Output file modes change.** JSON, CSV and `.meta.json` files used to be
+> written 0600 (owner-only) whatever the umask, and a rewrite narrowed an
+> existing 0664 file to 0600. A new file now gets `0o666` under the umask
+> (0644 under the usual 022, 0664 under 002) and an existing file keeps its
+> mode. **The canary now fails on a block (exit 3)** from a bare GitHub
+> runner instead of reporting a notice.
+
+### Fixed
+
+- **Output modes**, as above. The atomic write itself is unchanged: a temp
+  file in the target's directory, fsync, then rename.
+- **CSV formula guard:** a cell starting with a line feed is now escaped like
+  one starting with a tab or a carriage return. The sidecar records
+  `csv_cells_escaped`, the number of CSV cells that got a leading apostrophe
+  (null when no CSV was written), so the cells where the CSV and the JSON
+  differ are declared.
+- **Credential scan outside a git checkout:** in a tree git cannot list (an
+  unpacked source archive) the scan read 0 files and printed "ok". It now
+  walks the files on disk, and a scan that read nothing fails.
+- **Weekly dependency audit:** two newer urllib3 advisories (PYSEC-2026-4175,
+  PYSEC-2026-4177) are fixed only in urllib3 2.8.0, which pyppeteer's
+  `urllib3<2` pin rules out. They join the pyppeteer lock's ignore list by
+  ID, and the README now counts seven. Every other lock is still audited in
+  full.
+- **Canary:** green only when it parsed real rows. Exit 3, 4, 5 and 6 fail
+  it, with or without the proxy secret.
+- Comments and one released changelog line no longer point at private
+  maintainer notes; a suite check keeps it that way.
+
 ## [0.2.1] — 2026-09-29
 
 ### Fixed
@@ -34,7 +65,7 @@ a fresh clone of every repo in the organisation.
 ### Changed
 
 - **Connecting to the Scraping Browser API** follows one policy in every
-  engine (family template §26): three attempts 3 s apart for a locked
+  engine: three attempts 3 s apart for a locked
   profile or an outage, none for an expired login (401), and a message
   naming the cause — including the service's own `profile_locked`.
   pyppeteer's per-attempt timeout is 10 s, and the orphaned-task traceback

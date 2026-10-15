@@ -3,9 +3,8 @@ proxy_pool.py
 --------------
 A pool of proxy URLs and the rules for moving between them.
 
-Family core: no site knowledge lives here. Carried over from
-farfetch-scraper, with the credential-redaction helper from the newer repos
-folded in — see `redact_secret_patterns`.
+No site knowledge lives here. It also holds the credential-redaction
+helper every log line goes through — see `redact_secret_patterns`.
 
 Why this exists as its own module: `--proxy` was a single static string
 applied once at browser launch and never changed. That is the shape of a
@@ -425,7 +424,7 @@ def from_args(args) -> Optional[ProxyPool]:
 # ---------------------------------------------------------------------------
 # Connecting to the Scraping Browser API — one policy for every engine
 # ---------------------------------------------------------------------------
-# Measured in the family (template §26, 2026-09-24): a profile stays
+# Measured 2026-09-24: a profile stays
 # `profile_locked` for 1.6-1.9 s after a CLEAN disconnect, so a second run
 # started straight after the first was refused with HTTP 500. Three attempts
 # 3 s apart ride that out, while a profile genuinely held by another run
