@@ -37,7 +37,9 @@ import csv
 import hashlib
 import json
 import os
+import stat
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
@@ -114,6 +116,40 @@ def dedupe_by_sku(products: List[Product], seen: Set[str]) -> List[Product]:
     return fresh
 
 
+_UMASK_LOCK = threading.Lock()
+
+
+def _current_umask() -> int:
+    """The process umask, read without changing it where the OS allows."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    # Elsewhere the only way to read it is to set it and put it back; the
+    # lock keeps two writer threads from interleaving that pair.
+    with _UMASK_LOCK:
+        old = os.umask(0o022)
+        os.umask(old)
+    return old
+
+
+def _target_mode(path: str) -> int:
+    """The mode the finished file should have.
+
+    A file that already exists keeps its own mode, so a rerun never narrows
+    (or widens) what the owner chose for it. A new file gets what an ordinary
+    open() would give it: 0o666 filtered by the umask. A flat 0o644 is not
+    the same thing: it narrows 0664 under umask 002.
+    """
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        return 0o666 & ~_current_umask()
+
+
 def _atomic_write(path: str, write: Callable) -> None:
     """Write `path` through a temporary file in the same directory, then rename.
 
@@ -125,6 +161,7 @@ def _atomic_write(path: str, write: Callable) -> None:
     """
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
+    mode = _target_mode(path)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-",
                                suffix=f"-{os.path.basename(path)}")
     try:
@@ -133,6 +170,9 @@ def _atomic_write(path: str, write: Callable) -> None:
             write(f)
             f.flush()
             os.fsync(f.fileno())
+        # mkstemp creates the file 0600 and os.replace keeps that mode, so
+        # without this every output would be readable by its owner only.
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -143,9 +183,9 @@ def _atomic_write(path: str, write: Callable) -> None:
 
 
 # A leading one of these makes a spreadsheet treat the cell as a formula
-# rather than as text. \t and \r are here because Excel strips them and then
-# reads what follows.
-_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+# rather than as text. \t, \r and \n are here because a spreadsheet strips
+# leading whitespace and then reads what follows.
+_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
 def _cell(value):
@@ -222,23 +262,40 @@ def write_json(products: List[Product], path: str) -> None:
         [asdict(p) for p in products], f, ensure_ascii=False, indent=2))
 
 
-def write_csv(products: List[Product], path: str) -> None:
+def write_csv(products: List[Product], path: str) -> int:
+    """Write the CSV and return how many cells csv_safe had to escape.
+
+    The count goes into the sidecar as `csv_cells_escaped`, so the one place
+    the CSV and the JSON hold different text is declared rather than
+    discovered.
+    """
     # An empty result still gets the header row. A zero-byte file makes a
     # consumer fail on read (no columns to parse) instead of reading a valid
     # table with zero rows.
     if not products:
         _atomic_write(path, lambda f: csv.DictWriter(
             f, fieldnames=list(asdict(Product()).keys())).writeheader())
-        return
+        return 0
     fieldnames = list(asdict(products[0]).keys())
+    escaped = 0
 
     def _write(f):
+        nonlocal escaped
+        escaped = 0
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for p in products:
-            writer.writerow({k: csv_safe(_cell(v)) for k, v in asdict(p).items()})
+            row = {}
+            for k, v in asdict(p).items():
+                cell = _cell(v)
+                safe = csv_safe(cell)
+                if safe is not cell:
+                    escaped += 1
+                row[k] = safe
+            writer.writerow(row)
 
     _atomic_write(path, _write)
+    return escaped
 
 
 # Exit code used when a run completes but produced nothing. Distinct from 1
@@ -371,7 +428,8 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
              rank_gaps: Optional[List[List[int]]] = None,
              start_page: int = 1,
              engine: Optional[str] = None,
-             files: Optional[Dict[str, dict]] = None) -> dict:
+             files: Optional[Dict[str, dict]] = None,
+             csv_cells_escaped: Optional[int] = None) -> dict:
     """Build the metadata dict for a finished run.
 
     `status` is the field a consumer branches on:
@@ -428,6 +486,11 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     page. Together they are how a reader judges whether the catalogue was
     being edited underneath the run — see merge_pages for why the duplicate
     count alone cannot answer that.
+
+    `csv_cells_escaped` counts the CSV cells that got a leading apostrophe
+    because they began like a spreadsheet formula. The JSON keeps the site's
+    text unchanged, so this is how many cells differ between the two files.
+    None when no CSV was written.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -460,12 +523,14 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "start_page": start_page,
         "start_url": start_url,
         "final_url": final_url,
+        "csv_cells_escaped": csv_cells_escaped,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def save(products: List[Product], out_prefix: str, fmt: str,
-         allow_empty: bool = False) -> int:
+         allow_empty: bool = False,
+         csv_stats: Optional[dict] = None) -> int:
     """Write JSON/CSV and return a process exit code.
 
     On zero products, nothing is written at all unless `allow_empty`. A
@@ -477,6 +542,9 @@ def save(products: List[Product], out_prefix: str, fmt: str,
     `allow_empty=True` is for the legitimate case: a screen that genuinely
     matches nothing (the site says "0 results found"), where an empty file
     is the answer.
+
+    `csv_stats`, when given, receives `csv_cells_escaped` for a CSV that was
+    written, so finish_run can record it in the sidecar.
     """
     if not products and not allow_empty:
         print(f"[!] 0 rows — refusing to write {out_prefix}.json/.csv, so an "
@@ -488,7 +556,9 @@ def save(products: List[Product], out_prefix: str, fmt: str,
         write_json(products, f"{out_prefix}.json")
         print(f"[+] Saved {len(products)} rows -> {out_prefix}.json")
     if fmt in ("csv", "both"):
-        write_csv(products, f"{out_prefix}.csv")
+        escaped = write_csv(products, f"{out_prefix}.csv")
+        if csv_stats is not None:
+            csv_stats["csv_cells_escaped"] = escaped
         print(f"[+] Saved {len(products)} rows -> {out_prefix}.csv")
     return 0 if products else EXIT_NO_PRODUCTS
 
@@ -587,7 +657,9 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
     # empty. A blocked or failed run with nothing in it must never replace
     # the previous good output with [] — --allow-empty or not.
     may_write_empty = allow_empty and complete and not blocked
-    rc = save(products, out_prefix, fmt, allow_empty=may_write_empty)
+    csv_stats: dict = {}
+    rc = save(products, out_prefix, fmt, allow_empty=may_write_empty,
+              csv_stats=csv_stats)
     wrote_output = bool(products) or may_write_empty
 
     if wrote_output:
@@ -613,6 +685,7 @@ def finish_run(products: List[Product], out_prefix: str, fmt: str,
             rank_gaps=gaps, start_page=start_page,
             start_url=start_url, final_url=final_url, products=len(products),
             engine=engine,
+            csv_cells_escaped=csv_stats.get("csv_cells_escaped"),
             files={ext: file_digest(f"{out_prefix}.{ext}")
                    for ext in ("json", "csv") if fmt in (ext, "both")}))
 

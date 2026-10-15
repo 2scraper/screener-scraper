@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import stat
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -1105,7 +1106,13 @@ def check_banned_wording():
     # phrase is the suite itself.
     banned = ["anti" + "detect", "cloud " + "browser", "gate." + "2prx.com",
               "ANTI" + "DETECT_LOCAL_API"]
-    scanned, hits = 0, []
+    # References to private maintainer notes: nobody outside can open them,
+    # so a shipped file states its rule in its own words instead. Assembled
+    # from pieces for the same reason as the list above.
+    private = re.compile("|".join([
+        re.escape("claude" + ".md"), re.escape("claude_" + "2scraper"),
+        re.escape("2scraper_" + "repo_rules"), chr(0xA7) + r" ?\d"]))
+    scanned, hits, cites = 0, [], []
     for root, dirs, files in os.walk(REPO):
         dirs[:] = [d for d in dirs
                    if d not in {".git", "__pycache__", "captures", "legacy", "live"}
@@ -1121,9 +1128,13 @@ def check_banned_wording():
             for phrase in banned:
                 if phrase.lower() in text:
                     hits.append(f"{os.path.relpath(path, REPO)}: {phrase!r}")
+            for m in private.finditer(text):
+                cites.append(f"{os.path.relpath(path, REPO)}: {m.group(0)!r}")
     check(f"no shipped file uses a banned product name ({scanned} files scanned, "
           f"this suite included)" + (f" — {hits}" if hits else ""),
           not hits and scanned > 20)
+    check("no shipped file cites private maintainer notes or their section "
+          "numbers" + (f" — {cites[:5]}" if cites else ""), not cites)
     readme = os.path.join(REPO, "README.md")
     if os.path.exists(readme):
         check("the README names the Scraping Browser API",
@@ -1454,6 +1465,42 @@ def check_ci_checks_are_one_implementation():
           + ("" if result.returncode == 0 else
              f" — {(result.stdout + result.stderr).strip().splitlines()[-1][:120]}"),
           result.returncode == 0)
+
+    # A tree git cannot describe (a source archive, a copied folder) used to
+    # scan 0 files and print "ok". It must read the files on disk instead,
+    # and a scan that read nothing must fail rather than pass.
+    import shutil
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, ".github"))
+        shutil.copy(path, os.path.join(tmp, ".github", "ci_checks.py"))
+        with open(os.path.join(tmp, "planted.py"), "w", encoding="utf-8") as f:
+            f.write('KEY = "' + "c0ffee" * 5 + 'ab"\n')
+        env = dict(os.environ, GIT_CEILING_DIRECTORIES=tmp)
+        result = subprocess.run(
+            [sys.executable, os.path.join(tmp, ".github", "ci_checks.py"),
+             "--secret-check"], capture_output=True, text=True, cwd=tmp, env=env)
+        check("outside a git checkout the scan still reads the files on disk "
+              "and catches a planted key",
+              result.returncode != 0 and "planted.py" in result.stdout)
+    real_scanned = ci_checks.scanned_files
+    ci_checks.scanned_files = lambda: iter(())
+    try:
+        with redirect_stdout(io.StringIO()):
+            failures = ci_checks.secret_check()
+    finally:
+        ci_checks.scanned_files = real_scanned
+    check("a scan that read 0 files fails instead of reporting ok",
+          any("0 files" in f for f in failures))
+
+    # The canary is green only on real rows: a blocked or empty run tested
+    # nothing, so no branch of its exit-code step may end in success.
+    canary = os.path.join(REPO, ".github", "workflows", "canary.yml")
+    if os.path.exists(canary):
+        text = open(canary, encoding="utf-8").read()
+        step = text.split("Interpret the exit code", 1)[-1].split("- name:", 1)[0]
+        check("the canary turns no exit code but 0 into a green run",
+              "exit 0" not in step and "::notice::" not in step
+              and re.search(r"\n\s*3\)", step) is not None)
 
     workflow = os.path.join(REPO, ".github", "workflows", "tests.yml")
     if os.path.exists(workflow):
@@ -1935,6 +1982,44 @@ def check_csv_is_not_a_formula():
         eq("ordinary text is left exactly as it was",
            rows[2]["title"], "Gravity (India)")
 
+        # A leading line feed is stripped by a spreadsheet like a tab or a
+        # CR, and what follows it is then read as a formula.
+        escaped = output_writer.write_csv(
+            [_row(sku="4", title="\n=1+1"),
+             _row(sku="5", title="\r=1+1"),
+             _row(sku="6", title="\t=1+1", pe=-5.0)], path)
+        with open(path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        check("a cell led by a line feed is neutralised",
+              rows[0]["title"].startswith("'\n"))
+        check("and one led by a carriage return or a tab",
+              rows[1]["title"].startswith("'\r")
+              and rows[2]["title"].startswith("'\t"))
+        eq("a negative number in the CSV keeps its sign", rows[2]["pe"], "-5.0")
+        eq("write_csv returns how many cells it escaped", escaped, 3)
+
+    # The count reaches the sidecar, so the one place CSV and JSON differ is
+    # declared there.
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "run")
+        with redirect_stdout(io.StringIO()):
+            finish_run([_row(sku="1", title="=cmd"), _row(sku="2", title="ok")],
+                       prefix, "both", False, blocked=False,
+                       stop_reason="completed", pages_requested=1,
+                       pages_completed=1, start_url="u", final_url="u")
+        meta = json.load(open(f"{prefix}.meta.json", encoding="utf-8"))
+        eq("the sidecar records csv_cells_escaped", meta.get("csv_cells_escaped"), 1)
+        rows = json.load(open(f"{prefix}.json", encoding="utf-8"))
+        eq("and the JSON keeps the site's text", rows[0]["title"], "=cmd")
+        with redirect_stdout(io.StringIO()):
+            finish_run([_row(sku="1", title="=cmd")], prefix, "json", False,
+                       blocked=False, stop_reason="completed",
+                       pages_requested=1, pages_completed=1,
+                       start_url="u", final_url="u")
+        meta = json.load(open(f"{prefix}.meta.json", encoding="utf-8"))
+        eq("a JSON-only run records no CSV count",
+           meta.get("csv_cells_escaped", "absent"), None)
+
     # The columns that made the naive fix wrong: profit growth is
     # legitimately negative, and a quote in front of it would corrupt it.
     eq("a negative number keeps its sign and its type",
@@ -1961,6 +2046,44 @@ def check_writes_are_atomic():
            [r["sku"] for r in json.load(open(path, encoding="utf-8"))], ["good"])
         leftovers = [n for n in os.listdir(tmp) if n.startswith(".tmp-")]
         eq("and no temporary file behind", leftovers, [])
+
+    # The temporary file is created 0600, and os.replace keeps that mode.
+    # A new output must get what open() would give it (0o666 under the
+    # umask), and a rewrite must keep the mode the owner set. umask 002 is
+    # the case a flat 0o644 gets wrong, so it is in the matrix.
+    if os.name == "posix":
+        writers = (
+            ("write_json", lambda p: output_writer.write_json([_row()], p)),
+            ("write_csv", lambda p: output_writer.write_csv([_row()], p)),
+            ("write_run_meta", lambda p: output_writer.write_run_meta(
+                p[:-len(".meta.json")], {"status": "complete"})),
+        )
+        old_umask = os.umask(0o022)
+        try:
+            for umask, expected in ((0o022, 0o644), (0o002, 0o664),
+                                    (0o077, 0o600)):
+                os.umask(umask)
+                with tempfile.TemporaryDirectory() as tmp:
+                    for name, write in writers:
+                        path = os.path.join(tmp, f"new-{name}.meta.json")
+                        with redirect_stdout(io.StringIO()):
+                            write(path)
+                        eq(f"{name} creates a file {oct(expected)} under umask "
+                           f"{oct(umask)}",
+                           oct(stat.S_IMODE(os.stat(path).st_mode)), oct(expected))
+            os.umask(0o022)
+            with tempfile.TemporaryDirectory() as tmp:
+                for name, write in writers:
+                    path = os.path.join(tmp, f"old-{name}.meta.json")
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write("{}")
+                    os.chmod(path, 0o664)
+                    with redirect_stdout(io.StringIO()):
+                        write(path)
+                    eq(f"{name} keeps an existing file's 0o664",
+                       oct(stat.S_IMODE(os.stat(path).st_mode)), oct(0o664))
+        finally:
+            os.umask(old_umask)
 
 
 
@@ -2973,7 +3096,7 @@ def check_family_sync_2026_09_29():
                        capture_output=True, text=True)
     check("`env_config.py --help` answers without reading .env",
           r.returncode == 0 and ".env file:" not in r.stdout)
-    # 4. The Scraping Browser connect policy (template §26): retry a lock or
+    # 4. The Scraping Browser connect policy: retry a lock or
     #    an outage, never an expired login, and say which it was.
     eq("a 500 on the upgrade is retried", proxy_pool.cdp_retryable(
         "WebSocket error: ws://***:***@cb.2captcha.com:9222/ 500 Internal Server Error"), True)

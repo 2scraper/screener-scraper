@@ -213,7 +213,7 @@ def _connect_remote(pw, args):
     # four-line call log underneath it. An exception message is a log.
     #
     # Retried per proxy_pool's CDP policy: a profile stays locked for ~2 s
-    # after a clean disconnect (family template §26), so a run started right
+    # after a clean disconnect (measured 2026-09-24), so a run started right
     # after another met HTTP 500. A 401 (expired credentials) is not retried.
     for attempt in range(1, CDP_CONNECT_ATTEMPTS + 1):
         try:

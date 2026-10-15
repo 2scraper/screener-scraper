@@ -42,8 +42,10 @@ jobs:
           done
 
       - name: Audit the pyppeteer lock, minus its known urllib3 1.x advisories
-        # pyppeteer requires urllib3<2, and these five are fixed only in 2.x
-        # (measured 2026-09-25 against urllib3 1.26.20), so they cannot be
+        # pyppeteer requires urllib3<2, and these seven are fixed only in 2.x
+        # (the first five measured 2026-09-25 against urllib3 1.26.20; 4175
+        # and 4177 were published later and are fixed in 2.8.0, checked on
+        # osv.dev 2026-10-15; pyppeteer 2.0.0 still pins urllib3<2), so they cannot be
         # cleared while the pyppeteer engine exists. They are ignored BY ID,
         # not by package: any NEW advisory in this lock still fails the job.
         # README says what this means for someone running that engine.
@@ -54,4 +56,6 @@ jobs:
             --ignore-vuln PYSEC-2026-1994 \
             --ignore-vuln PYSEC-2026-1996 \
             --ignore-vuln PYSEC-2026-1998 \
-            --ignore-vuln PYSEC-2026-1999
+            --ignore-vuln PYSEC-2026-1999 \
+            --ignore-vuln PYSEC-2026-4175 \
+            --ignore-vuln PYSEC-2026-4177

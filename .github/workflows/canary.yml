@@ -9,7 +9,8 @@ name: canary
 # proxy and no account (measured 2026-09-25), and a canary that CAN pass
 # without a credential must not be gated on one — gated, the badge would go
 # green every day while testing nothing. The proxy secret is used when it is
-# set, and only changes how an exit 3 is read.
+# set. Only real rows make this job green: exit 3, 4, 5 or 6 fails it, with
+# or without the proxy.
 #
 # --pages 1, and that is a POLICY decision, not a technical one. screener.in's
 # robots.txt disallows `/*?page=` for all user agents, so a daily 3-page run
@@ -79,13 +80,15 @@ jobs:
           code="${{ steps.run.outputs.exit_code }}"
           case "$code" in
             0) echo "OK — rows parsed from a live run." ;;
-            3) if [ "${{ env.HAS_PROXY }}" = "true" ]; then
+            3) # A blocked canary tested nothing, so it is never green. Every
+               # scheduled run from a bare GitHub runner was served between
+               # 2026-09-25 and 2026-10-15, so a block is news either way.
+               if [ "${{ env.HAS_PROXY }}" = "true" ]; then
                  echo "::error::Blocked before parsing (exit 3) even through the configured proxy — this looks like a site-side change."
-                 exit 1
                else
-                 echo "::notice::Blocked before parsing (exit 3) from a bare GitHub runner, which is a datacentre address. screener.in served this URL from an ordinary connection on 2026-09-25; it also served a bare GitHub runner on this workflow's first dispatch (2026-09-25), so a block here is new — the runner's IP is still the likeliest cause, not a site change. Set the SCREENER_PROXY secret to check it properly."
-                 exit 0
-               fi ;;
+                 echo "::error::Blocked before parsing (exit 3) from a bare GitHub runner, which is a datacentre address. Bare runners were served on every run from 2026-09-25 to 2026-10-15, so this is new: either screener.in started refusing datacentre addresses or the site changed. Setting the SCREENER_PROXY secret tells the two apart."
+               fi
+               exit 1 ;;
             4) echo "::error::The site reported this sector as empty (exit 4) — it held 164 companies on 2026-09-25, so this is a site-side change." ; exit 1 ;;
             5) echo "::error::The content was never obtained (exit 5): a load timeout, or a page this code could not read. No remote API is involved here, so this is not a credential expiring." ; exit 1 ;;
             6) echo "::error::Partial run (exit 6) — see the sidecar's stop_reason. 'pagination_not_addressable' means the ?page= convention has stopped working." ; exit 1 ;;
