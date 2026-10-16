@@ -9,6 +9,12 @@ notes with a warning saying so.
 
 ## [Unreleased]
 
+### Changed
+
+- CI only: the canary's optional paid secret `SCREENER_PROXY` now reaches it only on a new weekly
+  run (Mondays 06:23 UTC) and on a manual dispatch. The daily run keeps its
+  schedule and takes the free route without them, so it bills nothing.
+
 ## [0.3.0] — 2026-10-16
 
 > **Output file modes change.** JSON, CSV and `.meta.json` files used to be
