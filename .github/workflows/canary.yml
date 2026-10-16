@@ -28,6 +28,10 @@ on:
     # Off the hour, so it is not competing with every other cron job for
     # runner availability.
     - cron: "23 6 * * *"
+    # Mondays: the same jobs, WITH the paid secrets (proxy, Scraping Browser,
+    # captcha key). On the daily run above those secrets read as empty, so
+    # it takes the free no-secret route and bills nothing.
+    - cron: "23 6 * * 1"
   workflow_dispatch:
 
 # Read-only token: nothing here writes to the repository.
@@ -40,7 +44,7 @@ jobs:
     # `secrets` is not available in a job-level `if`, so presence is tested
     # through job env and read in each step's `if`.
     env:
-      HAS_PROXY: ${{ secrets.SCREENER_PROXY != '' }}
+      HAS_PROXY: ${{ (github.event_name != 'schedule' || github.event.schedule == '23 6 * * 1') && secrets.SCREENER_PROXY != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -67,7 +71,7 @@ jobs:
         # failing the job, not the shell's errexit.
         continue-on-error: true
         env:
-          SCREENER_PROXY: ${{ secrets.SCREENER_PROXY }}
+          SCREENER_PROXY: ${{ (github.event_name != 'schedule' || github.event.schedule == '23 6 * * 1') && secrets.SCREENER_PROXY || '' }}
         run: |
           set +e
           python3 playwright_scraper.py \
