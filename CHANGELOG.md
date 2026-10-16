@@ -9,6 +9,8 @@ notes with a warning saying so.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-16
+
 > **Output file modes change.** JSON, CSV and `.meta.json` files used to be
 > written 0600 (owner-only) whatever the umask, and a rewrite narrowed an
 > existing 0664 file to 0600. A new file now gets `0o666` under the umask
