@@ -246,7 +246,7 @@ looks configurable and is not.
   each verified to parse identically to its untrimmed original. `pytest`
   runs the same suite. CI runs it on Python 3.9 and 3.12, once per engine in
   its own virtualenv, and builds the Docker image.
-- **Live:** `canary.yml` runs a real scrape of **page 1 only** daily,
+- **Live:** `canary.yml` runs a real scrape of **page 1 only** weekly (Mondays),
   **ungated** — this site needs no credential, so a canary that could pass
   without one is not gated on one — and asserts ranks 1–25, INR and market
   cap on every row, and that page 1 still states its page count. It was 3
