@@ -1,4 +1,4 @@
-# screener-scraper
+# Screener.in Scraper — Stock Screens and Sector Tables in Python
 
 [![release](https://img.shields.io/github/v/release/2scraper/screener-scraper)](https://github.com/2scraper/screener-scraper/releases)
 [![tests](https://github.com/2scraper/screener-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/screener-scraper/actions/workflows/tests.yml)
@@ -7,6 +7,8 @@
 ![licence](https://img.shields.io/badge/licence-MIT-green)
 ![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)
 ![account](https://img.shields.io/badge/runs%20without%20an%20account-yes-brightgreen)
+
+**Screener.in scraper** — an open-source (MIT) Python tool that reads screener.in stock screens and sector or industry listings, and writes one row per company — price, market cap, P/E, dividend yield, quarterly sales and profit, ROCE and every other column the table shows — to JSON or CSV. On 2026-09-25 plain `curl` from a residential connection, with no key, no proxy and no account, was served a sector page and its page 2, three screens and page 220 of the "All Stocks" screen in full. Use it to build a dataset of a screen's companies and their figures, or compare two exhaustive runs of the same listing with `diff_runs.py`.
 
 A scraper for **[screener.in](https://www.screener.in)** result tables — any
 stock screen (`/screens/{id}/{slug}/`) and any sector or industry listing
@@ -272,6 +274,23 @@ and your responsibility as the operator. Rate-limit your requests (`--delay`),
 collect only publicly available data, and note that the data is provided to
 screener.in by a third party (the footer credits C-MOTS Internet Technologies).
 This project is provided as-is, for research and legitimate use.
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [TipRanks scraper](https://github.com/2scraper/tipranks-scraper) — Smart Score, analyst consensus and price targets for any…
+- [Binance scraper](https://github.com/2scraper/binance-scraper) — P2P adverts, copy-trading portfolios and announcements…
+- [Google Finance scraper](https://github.com/2scraper/google-finance-scraper) — Quotes, quarterly financials, analyst targets, OHLCV, market…
+- [OpenSea scraper](https://github.com/2scraper/opensea-scraper) — NFT items, collection rankings and activity feeds…
+- [Polymarket scraper](https://github.com/2scraper/polymarket-scraper) — Prediction-market prices, order books, volumes and on-chain…
+- [Better Business Bureau scraper](https://github.com/2scraper/bbb-scraper) — BBB search and category listings with no key or proxy, plus…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
 
 ## Licence
 
