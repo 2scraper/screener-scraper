@@ -9,6 +9,10 @@ notes with a warning saying so.
 
 ## [Unreleased]
 
+### Security
+
+- **certifi 2026.7.22 → 2026.10.23** in every lock (`requirements.lock` and the Playwright, Selenium and pyppeteer locks), clearing PYSEC-2026-4320. The CI tooling lock also moves filelock 4.0.5 → 4.2.9 (Python ≥ 3.11) and msgpack 1.2.2 → 1.2.4 for their advisories. Only these packages were upgraded; every other pin is unchanged. On Python 3.9 and 3.10 the CI lock keeps filelock 3.19.1 and 4.1.0, the newest releases installable there; the audit job runs on 3.12.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:23 UTC) and on a manual dispatch, with its optional secret `SCREENER_PROXY` passed on every run; the daily schedule is removed.
