@@ -18,6 +18,14 @@ WORKDIR /app
 # From the lock, hash-checked: the image carries exactly the versions CI
 # tested, and a tampered download fails the build instead of shipping.
 COPY requirements-playwright.lock ./
+# libatomic1 first: Playwright's bundled Node driver needs it just to run
+# `playwright install`, i.e. before that command can install any system
+# dependency itself (the slim base image does not ship it; the build
+# failed with "libatomic.so.1: cannot open shared object file").
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir --require-hashes -r requirements-playwright.lock \
     # Playwright's own apt-get for Chromium's shared libraries — not pip
     # packages, so this has to be its own explicit step.
